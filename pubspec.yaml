@@ -39,6 +39,9 @@ dependencies:
   mouse_event: ^0.2.1
   shared_preferences: ^2.5.0
   hotkey_manager: ^0.2.3
+  win32: ^5.0.0
+  ffi: ^2.1.0
+  file_picker: ^8.0.0
 
 dev_dependencies:
   flutter_test:

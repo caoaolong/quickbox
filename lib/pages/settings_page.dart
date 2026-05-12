@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import '../services/app_settings.dart';
+import '../services/index_service.dart';
 
 class SettingsPage extends StatefulWidget {
   final AppSettings appSettings;
@@ -18,6 +20,10 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  int _selectedIndex = 0;
+  bool _isBuildingIndex = false;
+  String _indexStatus = '';
+
   @override
   void initState() {
     super.initState();
@@ -51,21 +57,53 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildThemeSection(),
-            const SizedBox(height: 40),
-            _buildHotKeySection(),
-          ],
-        ),
+      body: Row(
+        children: [
+          NavigationRail(
+            selectedIndex: _selectedIndex,
+            onDestinationSelected: (i) => setState(() => _selectedIndex = i),
+            labelType: NavigationRailLabelType.all,
+            destinations: const [
+              NavigationRailDestination(
+                icon: Icon(Icons.settings),
+                label: Text('常规'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.keyboard),
+                label: Text('热键'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.storage),
+                label: Text('数据'),
+              ),
+            ],
+          ),
+          const VerticalDivider(width: 1),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: _buildContent(),
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildThemeSection() {
+  Widget _buildContent() {
+    switch (_selectedIndex) {
+      case 0:
+        return _buildGeneralTab();
+      case 1:
+        return _buildHotKeyTab();
+      case 2:
+        return _buildDataTab();
+      default:
+        return const SizedBox.shrink();
+    }
+  }
+
+  Widget _buildGeneralTab() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -101,7 +139,7 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _buildHotKeySection() {
+  Widget _buildHotKeyTab() {
     final label = widget.appSettings.hotKeyLabel();
 
     return Column(
@@ -131,5 +169,98 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
       ],
     );
+  }
+
+  Widget _buildDataTab() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '数据管理',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 24),
+        const Text(
+          '索引目录',
+          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.grey.shade400),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.appSettings.indexDirectory.isEmpty
+                      ? '未选择目录'
+                      : widget.appSettings.indexDirectory,
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ),
+              TextButton(
+                onPressed: _pickDirectory,
+                child: const Text('选择'),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 24),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: _isBuildingIndex ? null : _buildIndex,
+            icon: _isBuildingIndex
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh),
+            label: Text(
+              widget.appSettings.indexExists ? '重建应用索引' : '创建应用索引',
+            ),
+          ),
+        ),
+        if (_indexStatus.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Text(
+            _indexStatus,
+            style: const TextStyle(fontSize: 13, color: Colors.grey),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Future<void> _pickDirectory() async {
+    final result = await FilePicker.platform.getDirectoryPath();
+    if (result != null) {
+      await widget.appSettings.setIndexDirectory(result);
+    }
+  }
+
+  Future<void> _buildIndex() async {
+    setState(() {
+      _isBuildingIndex = true;
+      _indexStatus = '正在扫描应用...';
+    });
+
+    try {
+      final service = IndexService(appSettings: widget.appSettings);
+      final count = await service.buildIndex();
+      setState(() {
+        _indexStatus = '索引完成，共扫描 $count 个应用';
+      });
+    } catch (e) {
+      setState(() {
+        _indexStatus = '索引创建失败: $e';
+      });
+    } finally {
+      setState(() => _isBuildingIndex = false);
+    }
   }
 }

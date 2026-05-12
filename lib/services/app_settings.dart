@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,12 +9,15 @@ import 'package:hotkey_manager/hotkey_manager.dart';
 class AppSettings extends ChangeNotifier {
   static const _themeKey = 'theme_mode';
   static const _hotkeyJsonKey = 'hotkey_json';
+  static const _indexDirKey = 'index_directory';
 
   ThemeMode _themeMode = ThemeMode.system;
   HotKey? _hotKey;
+  String _indexDirectory = '';
 
   ThemeMode get themeMode => _themeMode;
   HotKey? get hotKey => _hotKey;
+  String get indexDirectory => _indexDirectory;
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -33,7 +37,39 @@ class AppSettings extends ChangeNotifier {
       scope: HotKeyScope.system,
     );
 
+    _indexDirectory = prefs.getString(_indexDirKey) ?? _defaultIndexDir();
+    _ensureIndexDir();
+
     notifyListeners();
+  }
+
+  String _defaultIndexDir() {
+    final appData = Platform.environment['APPDATA'];
+    if (appData != null) {
+      return '$appData\\quickbox\\index';
+    }
+    return '${Platform.environment['USERPROFILE'] ?? '.'}\\.quickbox\\index';
+  }
+
+  Future<void> _ensureIndexDir() async {
+    if (_indexDirectory.isEmpty) return;
+    final dir = Directory(_indexDirectory);
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+  }
+
+  Future<void> setIndexDirectory(String path) async {
+    _indexDirectory = path;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_indexDirKey, path);
+    await _ensureIndexDir();
+    notifyListeners();
+  }
+
+  bool get indexExists {
+    if (_indexDirectory.isEmpty) return false;
+    return File('$_indexDirectory\\apps.json').existsSync();
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {

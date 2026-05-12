@@ -1,6 +1,7 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
@@ -11,6 +12,8 @@ import 'cards/quick_apps.dart';
 import 'cards/web_quick_open.dart';
 import 'cards/quick_commands.dart';
 import 'cards/quick_notes.dart';
+import 'cards/icon_extractor.dart';
+import 'services/shortcut_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -80,37 +83,29 @@ class _QuickBox extends State<QuickBox> with TrayListener {
   int _selectedCardIndex = -1;
   List<CardItem> _cardItems = [];
   bool _isLoading = false;
+  String _searchQuery = '';
+  List<CardItem> _searchResults = [];
+  final _searchController = TextEditingController();
 
-  final _cards = <BaseCard>[
-    QuickAppsCard(),
-    WebQuickOpenCard(),
-    QuickCommandsCard(),
-    QuickNotesCard(),
-  ];
+  late final List<BaseCard> _cards;
+  late final ShortcutService _shortcutService;
 
   @override
   void initState() {
     super.initState();
+    _cards = [
+      QuickAppsCard(indexDirectory: widget.appSettings.indexDirectory),
+      WebQuickOpenCard(),
+      QuickCommandsCard(),
+      QuickNotesCard(),
+    ];
+    _searchController.addListener(_onSearchChanged);
     trayManager.addListener(this);
     _initTray();
-    _registerHotKey();
-  }
 
-  void _registerHotKey() async {
-    final hotKey = widget.appSettings.hotKey;
-    if (hotKey != null) {
-      await hotKeyManager.register(
-        hotKey,
-        keyDownHandler: (_) {
-          _toggleWindow();
-        },
-      );
-    }
-  }
-
-  void _reRegisterHotKey() async {
-    await hotKeyManager.unregisterAll();
-    _registerHotKey();
+    _shortcutService = ShortcutService(appSettings: widget.appSettings);
+    _shortcutService.onToggleWindow = _toggleWindow;
+    _shortcutService.init();
   }
 
   void _toggleWindow() async {
@@ -121,6 +116,43 @@ class _QuickBox extends State<QuickBox> with TrayListener {
       await windowManager.show();
       await windowManager.focus();
     }
+  }
+
+  void _reRegisterHotKey() {
+    _shortcutService.reRegister();
+  }
+
+  void _onSearchChanged() {
+    final query = _searchController.text;
+    if (query == _searchQuery) return;
+    _searchQuery = query;
+    if (query.trim().isEmpty) {
+      setState(() => _searchResults = []);
+      return;
+    }
+    _performSearch(query);
+  }
+
+  Future<void> _performSearch(String query) async {
+    final results = await _cards[0].search(query);
+    if (!mounted || _searchController.text != query) return;
+    setState(() => _searchResults = results);
+  }
+
+  void _handleEsc() {
+    if (_isOnSettingsPage) {
+      setState(() => _isOnSettingsPage = false);
+      return;
+    }
+    if (_searchQuery.isNotEmpty) {
+      _searchController.clear();
+      return;
+    }
+    if (_selectedCardIndex >= 0) {
+      setState(() => _selectedCardIndex = -1);
+      return;
+    }
+    windowManager.hide();
   }
 
   void _initTray() async {
@@ -242,7 +274,7 @@ class _QuickBox extends State<QuickBox> with TrayListener {
                   : ListView.separated(
                       padding: const EdgeInsets.symmetric(vertical: 4),
                       itemCount: _cardItems.length,
-                      separatorBuilder: (_, __) => const Divider(
+                      separatorBuilder: (_, i) => const Divider(
                         height: 1,
                         indent: 16,
                         endIndent: 16,
@@ -258,7 +290,7 @@ class _QuickBox extends State<QuickBox> with TrayListener {
                           subtitle: item.subtitle != null
                               ? Text(item.subtitle!, style: const TextStyle(color: Colors.white54))
                               : null,
-                          leading: Icon(item.icon, color: Colors.white70),
+                          leading: _AppIcon(iconPath: item.iconPath, fallback: item.icon),
                           onTap: () => card.onItemTap(item),
                         );
                       },
@@ -270,10 +302,38 @@ class _QuickBox extends State<QuickBox> with TrayListener {
     );
   }
 
+  Widget _buildSearchResults() {
+    final query = _searchQuery.trim();
+    if (_searchResults.isEmpty) {
+      return const Center(
+        child: Text('未找到匹配的应用', style: TextStyle(color: Colors.white54)),
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      itemCount: _searchResults.length,
+      separatorBuilder: (_, i) => const Divider(
+        height: 1,
+        indent: 16,
+        endIndent: 16,
+        color: Colors.white12,
+      ),
+      itemBuilder: (context, i) {
+        final item = _searchResults[i];
+        return ListTile(
+          title: _HighlightedText(text: item.title, query: query),
+          leading: _AppIcon(iconPath: item.iconPath, fallback: item.icon),
+          onTap: () => _cards[0].onItemTap(item),
+        );
+      },
+    );
+  }
+
   @override
   void dispose() {
+    _searchController.dispose();
     trayManager.removeListener(this);
-    hotKeyManager.unregisterAll();
+    _shortcutService.dispose();
     super.dispose();
   }
 
@@ -286,7 +346,16 @@ class _QuickBox extends State<QuickBox> with TrayListener {
       );
     }
 
-    return Scaffold(
+    return Focus(
+      autofocus: true,
+      onKeyEvent: (node, event) {
+        if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.escape) {
+          _handleEsc();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: Scaffold(
       backgroundColor: Colors.transparent,
       body: ClipRRect(
         borderRadius: BorderRadius.circular(16),
@@ -306,9 +375,10 @@ class _QuickBox extends State<QuickBox> with TrayListener {
                 children: [
                   const SizedBox(height: 20),
                   TextField(
+                    controller: _searchController,
                     style: const TextStyle(color: Colors.white, fontSize: 16),
                     decoration: InputDecoration(
-                      hintText: '搜索...',
+                      hintText: '搜索应用...',
                       hintStyle: const TextStyle(color: Colors.white60),
                       prefixIcon: const Icon(
                         Icons.search,
@@ -324,15 +394,18 @@ class _QuickBox extends State<QuickBox> with TrayListener {
                   ),
                   const SizedBox(height: 24),
                   Expanded(
-                    child: _selectedCardIndex == -1
-                        ? _buildCardGrid()
-                        : _buildCardList(),
+                    child: _searchQuery.trim().isNotEmpty
+                        ? _buildSearchResults()
+                        : _selectedCardIndex == -1
+                            ? _buildCardGrid()
+                            : _buildCardList(),
                   ),
                 ],
               ),
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -399,5 +472,92 @@ class _CardWidgetState extends State<_CardWidget> {
         ),
       ),
     );
+  }
+}
+
+class _AppIcon extends StatefulWidget {
+  final String? iconPath;
+  final IconData fallback;
+
+  const _AppIcon({this.iconPath, required this.fallback});
+
+  @override
+  State<_AppIcon> createState() => _AppIconState();
+}
+
+class _AppIconState extends State<_AppIcon> {
+  Uint8List? _bytes;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(_AppIcon old) {
+    super.didUpdateWidget(old);
+    if (old.iconPath != widget.iconPath) _load();
+  }
+
+  Future<void> _load() async {
+    final path = widget.iconPath;
+    if (path == null) return;
+    final bytes = await extractIconBytes(path);
+    if (!mounted) return;
+    setState(() => _bytes = bytes);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_bytes != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: Image.memory(
+          _bytes!,
+          width: 24,
+          height: 24,
+          fit: BoxFit.contain,
+        ),
+      );
+    }
+    return Icon(widget.fallback, color: Colors.white70);
+  }
+}
+
+class _HighlightedText extends StatelessWidget {
+  final String text;
+  final String query;
+
+  const _HighlightedText({required this.text, required this.query});
+
+  @override
+  Widget build(BuildContext context) {
+    if (query.isEmpty) {
+      return Text(text, style: const TextStyle(color: Colors.white));
+    }
+
+    final lower = text.toLowerCase();
+    final q = query.toLowerCase();
+    final spans = <TextSpan>[];
+    int start = 0;
+
+    while (true) {
+      final idx = lower.indexOf(q, start);
+      if (idx == -1) {
+        spans.add(TextSpan(text: text.substring(start)));
+        break;
+      }
+      if (idx > start) {
+        spans.add(TextSpan(text: text.substring(start, idx)));
+      }
+      spans.add(TextSpan(
+        text: text.substring(idx, idx + q.length),
+        style: const TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold),
+      ));
+      start = idx + q.length;
+    }
+
+    return RichText(text: TextSpan(style: const TextStyle(color: Colors.white), children: spans));
   }
 }
