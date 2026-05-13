@@ -81,8 +81,10 @@ jobs:
       - run: flutter build macos --release
       - name: Package
         run: |
-          if [ -d "build/macos/Build/Products/Release/Runner.app" ]; then
-            ditto -c -k --keepParent build/macos/Build/Products/Release/Runner.app quickbox-macos.zip
+          APP=$(find build/macos/Build/Products -name "*.app" -maxdepth 2 2>/dev/null | head -1)
+          if [ -n "$APP" ]; then
+            echo "Found: $APP"
+            ditto -c -k --keepParent "$APP" quickbox-macos.zip
           else
             echo "macOS build output not found"
             exit 1
