@@ -6,7 +6,9 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'services/app_settings.dart';
+import 'services/user_card_store.dart';
 import 'pages/settings_page.dart';
+import 'pages/card_item_form_page.dart';
 import 'cards/base_card.dart';
 import 'cards/quick_apps.dart';
 import 'cards/web_quick_open.dart';
@@ -78,33 +80,59 @@ class QuickBox extends StatefulWidget {
   State<StatefulWidget> createState() => _QuickBox();
 }
 
-class _QuickBox extends State<QuickBox> with TrayListener {
+class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
   bool _isOnSettingsPage = false;
   int _selectedCardIndex = -1;
   List<CardItem> _cardItems = [];
   bool _isLoading = false;
   String _searchQuery = '';
   List<CardItem> _searchResults = [];
+  int _selectedSearchIndex = -1;
+  final List<GlobalKey> _searchResultKeys = [];
   final _searchController = TextEditingController();
+  final _searchFocusNode = FocusNode(debugLabel: 'search');
 
   late final List<BaseCard> _cards;
+  late final UserCardStore _userCardStore;
   late final ShortcutService _shortcutService;
 
   @override
   void initState() {
     super.initState();
+    _userCardStore = UserCardStore(appSettings: widget.appSettings);
     _cards = [
-      QuickAppsCard(indexDirectory: widget.appSettings.indexDirectory),
-      WebQuickOpenCard(),
-      QuickCommandsCard(),
-      QuickNotesCard(),
+      QuickAppsCard(
+        indexDirectory: widget.appSettings.indexDirectory,
+        userStore: _userCardStore,
+        onUserDataChanged: _onUserCardDataChanged,
+      ),
+      WebQuickOpenCard(
+        userStore: _userCardStore,
+        onUserDataChanged: _onUserCardDataChanged,
+      ),
+      QuickCommandsCard(
+        userStore: _userCardStore,
+        onUserDataChanged: _onUserCardDataChanged,
+      ),
+      QuickNotesCard(
+        userStore: _userCardStore,
+        onUserDataChanged: _onUserCardDataChanged,
+      ),
     ];
     _searchController.addListener(_onSearchChanged);
     trayManager.addListener(this);
+    windowManager.addListener(this);
     _initTray();
+    HardwareKeyboard.instance.addHandler(_handleHardwareKey);
 
     _shortcutService = ShortcutService(appSettings: widget.appSettings);
     _shortcutService.onToggleWindow = _toggleWindow;
+    _shortcutService.shouldHandleCardShortcuts =
+        () => !_isOnSettingsPage && mounted;
+    _shortcutService.onCardShortcut = (index) {
+      _searchController.clear();
+      _openCard(index);
+    };
     _shortcutService.init();
   }
 
@@ -115,7 +143,54 @@ class _QuickBox extends State<QuickBox> with TrayListener {
       setState(() => _isOnSettingsPage = false);
       await windowManager.show();
       await windowManager.focus();
+      _focusSearchField();
     }
+  }
+
+  void _focusSearchField() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _searchFocusNode.requestFocus();
+    });
+  }
+
+  void _onUserCardDataChanged() {
+    if (!mounted) return;
+    if (_selectedCardIndex >= 0) {
+      _openCard(_selectedCardIndex);
+    }
+    if (_searchQuery.trim().isNotEmpty) {
+      _performSearch(_searchController.text);
+    }
+  }
+
+  Widget? _userEntryTrailing(
+    BuildContext context,
+    BaseCard card,
+    CardItem item,
+  ) {
+    if (!item.isUserEntry) return null;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.edit_outlined, color: Colors.white70, size: 22),
+          tooltip: '编辑',
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 38, minHeight: 40),
+          onPressed: () => card.itemInteractor.onItemEdit(context, item),
+        ),
+        IconButton(
+          icon: const Icon(Icons.delete_outline, color: Colors.white70, size: 22),
+          tooltip: '删除',
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 38, minHeight: 40),
+          onPressed: () => card.itemInteractor.onItemDelete(context, item),
+        ),
+      ],
+    );
   }
 
   void _reRegisterHotKey() {
@@ -127,7 +202,10 @@ class _QuickBox extends State<QuickBox> with TrayListener {
     if (query == _searchQuery) return;
     _searchQuery = query;
     if (query.trim().isEmpty) {
-      setState(() => _searchResults = []);
+      setState(() {
+        _searchResults = [];
+        _selectedSearchIndex = -1;
+      });
       return;
     }
     _performSearch(query);
@@ -136,7 +214,69 @@ class _QuickBox extends State<QuickBox> with TrayListener {
   Future<void> _performSearch(String query) async {
     final results = await _cards[0].search(query);
     if (!mounted || _searchController.text != query) return;
-    setState(() => _searchResults = results);
+    setState(() {
+      _searchResults = results;
+      _selectedSearchIndex = results.isEmpty ? -1 : 0;
+    });
+  }
+
+  bool _handleHardwareKey(KeyEvent event) {
+    if (_isOnSettingsPage) return false;
+    if (event is! KeyDownEvent) return false;
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      if (!mounted) return false;
+      // 有顶层路由（新建/编辑表单等）时交给后续处理器（如表单内 Esc 仅 pop），避免误触发主界面 _handleEsc 隐藏窗口
+      if (Navigator.canPop(context)) {
+        return false;
+      }
+      _handleEsc();
+      return true;
+    }
+    if (_searchQuery.trim().isEmpty || _searchResults.isEmpty) return false;
+
+    if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+      setState(() {
+        final n = _searchResults.length;
+        _selectedSearchIndex = (_selectedSearchIndex + 1) % n;
+      });
+      _scrollSelectedSearchItemIntoView();
+      return true;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+      setState(() {
+        final n = _searchResults.length;
+        _selectedSearchIndex = (_selectedSearchIndex - 1 + n) % n;
+      });
+      _scrollSelectedSearchItemIntoView();
+      return true;
+    }
+    return false;
+  }
+
+  void _ensureSearchResultKeys() {
+    final n = _searchResults.length;
+    while (_searchResultKeys.length < n) {
+      _searchResultKeys.add(GlobalKey());
+    }
+    if (_searchResultKeys.length > n) {
+      _searchResultKeys.removeRange(n, _searchResultKeys.length);
+    }
+  }
+
+  void _scrollSelectedSearchItemIntoView() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final i = _selectedSearchIndex;
+      if (i < 0 || i >= _searchResultKeys.length) return;
+      final ctx = _searchResultKeys[i].currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          alignment: 0.35,
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    });
   }
 
   void _handleEsc() {
@@ -173,6 +313,16 @@ class _QuickBox extends State<QuickBox> with TrayListener {
   }
 
   @override
+  void onWindowFocus() {
+    HardwareKeyboard.instance.syncKeyboardState();
+  }
+
+  @override
+  void onWindowRestore() {
+    HardwareKeyboard.instance.syncKeyboardState();
+  }
+
+  @override
   void onTrayMenuItemClick(MenuItem menuItem) {
     switch (menuItem.key) {
       case 'show':
@@ -191,6 +341,7 @@ class _QuickBox extends State<QuickBox> with TrayListener {
     setState(() => _isOnSettingsPage = false);
     await windowManager.show();
     await windowManager.focus();
+    _focusSearchField();
   }
 
   void _openSettings() async {
@@ -199,7 +350,7 @@ class _QuickBox extends State<QuickBox> with TrayListener {
     await windowManager.focus();
   }
 
-  Widget _buildCardGrid() {
+  Widget _buildCardGrid(BuildContext context) {
     return Row(
       children: List.generate(_cards.length, (i) {
         final card = _cards[i];
@@ -211,6 +362,7 @@ class _QuickBox extends State<QuickBox> with TrayListener {
               name: card.name,
               icon: card.icon,
               onTap: () => _openCard(i),
+              onAddTap: () => _openNewItemForm(context, i),
             ),
           ),
         );
@@ -224,11 +376,31 @@ class _QuickBox extends State<QuickBox> with TrayListener {
       _isLoading = true;
       _cardItems = [];
     });
+    _focusSearchField();
     final items = await _cards[index].scan();
+    if (!mounted) return;
     setState(() {
       _cardItems = items;
       _isLoading = false;
     });
+    _focusSearchField();
+  }
+
+  Future<void> _openNewItemForm(BuildContext context, int cardIndex) async {
+    final card = _cards[cardIndex];
+    final saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (ctx) => CardItemFormPage(
+          cardIndex: cardIndex,
+          gradient: card.gradient,
+          cardTitle: card.name,
+          userCardStore: _userCardStore,
+        ),
+      ),
+    );
+    if (saved == true && mounted) {
+      _onUserCardDataChanged();
+    }
   }
 
   Widget _buildCardList() {
@@ -291,7 +463,8 @@ class _QuickBox extends State<QuickBox> with TrayListener {
                               ? Text(item.subtitle!, style: const TextStyle(color: Colors.white54))
                               : null,
                           leading: _AppIcon(iconPath: item.iconPath, fallback: item.icon),
-                          onTap: () => card.onItemTap(item),
+                          trailing: _userEntryTrailing(context, card, item),
+                          onTap: () => card.itemInteractor.onItemTap(item),
                         );
                       },
                     ),
@@ -309,8 +482,9 @@ class _QuickBox extends State<QuickBox> with TrayListener {
         child: Text('未找到匹配的应用', style: TextStyle(color: Colors.white54)),
       );
     }
+    _ensureSearchResultKeys();
     return ListView.separated(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 6),
       itemCount: _searchResults.length,
       separatorBuilder: (_, i) => const Divider(
         height: 1,
@@ -320,10 +494,21 @@ class _QuickBox extends State<QuickBox> with TrayListener {
       ),
       itemBuilder: (context, i) {
         final item = _searchResults[i];
+        final isSelected = i == _selectedSearchIndex;
         return ListTile(
+          key: _searchResultKeys[i],
+          selected: isSelected,
+          selectedTileColor: Colors.lightBlue.withAlpha(46),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+            side: isSelected
+                ? const BorderSide(color: Color(0xFF7EB8FF), width: 2)
+                : BorderSide.none,
+          ),
           title: _HighlightedText(text: item.title, query: query),
           leading: _AppIcon(iconPath: item.iconPath, fallback: item.icon),
-          onTap: () => _cards[0].onItemTap(item),
+          trailing: _userEntryTrailing(context, _cards[0], item),
+          onTap: () => _cards[0].itemInteractor.onItemTap(item),
         );
       },
     );
@@ -331,8 +516,11 @@ class _QuickBox extends State<QuickBox> with TrayListener {
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleHardwareKey);
+    _searchFocusNode.dispose();
     _searchController.dispose();
     trayManager.removeListener(this);
+    windowManager.removeListener(this);
     _shortcutService.dispose();
     super.dispose();
   }
@@ -346,16 +534,7 @@ class _QuickBox extends State<QuickBox> with TrayListener {
       );
     }
 
-    return Focus(
-      autofocus: true,
-      onKeyEvent: (node, event) {
-        if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.escape) {
-          _handleEsc();
-          return KeyEventResult.handled;
-        }
-        return KeyEventResult.ignored;
-      },
-      child: Scaffold(
+    return Scaffold(
       backgroundColor: Colors.transparent,
       body: ClipRRect(
         borderRadius: BorderRadius.circular(16),
@@ -376,6 +555,7 @@ class _QuickBox extends State<QuickBox> with TrayListener {
                   const SizedBox(height: 20),
                   TextField(
                     controller: _searchController,
+                    focusNode: _searchFocusNode,
                     style: const TextStyle(color: Colors.white, fontSize: 16),
                     decoration: InputDecoration(
                       hintText: '搜索应用...',
@@ -397,7 +577,7 @@ class _QuickBox extends State<QuickBox> with TrayListener {
                     child: _searchQuery.trim().isNotEmpty
                         ? _buildSearchResults()
                         : _selectedCardIndex == -1
-                            ? _buildCardGrid()
+                            ? _buildCardGrid(context)
                             : _buildCardList(),
                   ),
                 ],
@@ -405,7 +585,6 @@ class _QuickBox extends State<QuickBox> with TrayListener {
             ),
           ],
         ),
-      ),
       ),
     );
   }
@@ -416,12 +595,14 @@ class _CardWidget extends StatefulWidget {
   final String name;
   final IconData icon;
   final VoidCallback onTap;
+  final VoidCallback onAddTap;
 
   const _CardWidget({
     required this.gradient,
     required this.name,
     required this.icon,
     required this.onTap,
+    required this.onAddTap,
   });
 
   @override
@@ -437,39 +618,53 @@ class _CardWidgetState extends State<_CardWidget> {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: _onTapDown,
-      onTapUp: _onTapUp,
-      onTapCancel: _onTapCancel,
-      onTap: widget.onTap,
-      child: AnimatedScale(
-        scale: _scale,
-        duration: const Duration(milliseconds: 100),
-        child: Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: widget.gradient,
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(widget.icon, color: Colors.white, size: 36),
-              const SizedBox(height: 8),
-              Text(
-                widget.name,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: widget.gradient,
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        children: [
+          Expanded(
+            child: GestureDetector(
+              onTapDown: _onTapDown,
+              onTapUp: _onTapUp,
+              onTapCancel: _onTapCancel,
+              onTap: widget.onTap,
+              child: AnimatedScale(
+                scale: _scale,
+                duration: const Duration(milliseconds: 100),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(widget.icon, color: Colors.white, size: 36),
+                    const SizedBox(height: 8),
+                    Text(
+                      widget.name,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
+            ),
           ),
-        ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: IconButton(
+              icon: const Icon(Icons.add_circle_outline, color: Colors.white),
+              tooltip: '新建',
+              onPressed: widget.onAddTap,
+            ),
+          ),
+        ],
       ),
     );
   }

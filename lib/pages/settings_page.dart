@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:window_manager/window_manager.dart';
@@ -142,32 +143,111 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _buildHotKeyTab() {
     final label = widget.appSettings.hotKeyLabel();
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          '全局快捷键',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '全局快捷键',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '用于显示或隐藏主窗口',
+            style: TextStyle(fontSize: 14, color: Colors.grey),
+          ),
+          const SizedBox(height: 16),
+          HotKeyRecorder(
+            initalHotKey: widget.appSettings.hotKey,
+            onHotKeyRecorded: (hotKey) {
+              widget.appSettings.setHotKey(hotKey);
+              widget.onHotKeyChanged();
+            },
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '当前快捷键: $label',
+            style: const TextStyle(fontSize: 14),
+          ),
+          const SizedBox(height: 32),
+          const Text(
+            '卡片快捷键',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '主窗口在前台且未打开「设置」时生效，打开对应卡片列表（默认 Ctrl + 数字 1～4）',
+            style: TextStyle(fontSize: 14, color: Colors.grey),
+          ),
+          const SizedBox(height: 16),
+          ...List.generate(AppSettings.cardShortcutCount, _buildCardShortcutRow),
+        ],
+      ),
+    );
+  }
+
+  static const _cardNames = ['快捷应用', '网页快开', '快捷指令', '快速笔记'];
+
+  Widget _buildCardShortcutRow(int index) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 88,
+            child: Text(
+              _cardNames[index],
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              widget.appSettings.cardHotKeyLabel(index),
+              style: const TextStyle(fontSize: 14),
+            ),
+          ),
+          TextButton(
+            onPressed: () => _showCardShortcutDialog(index),
+            child: const Text('更改'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showCardShortcutDialog(int index) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('「${_cardNames[index]}」快捷键'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '请按下新的组合键',
+              style: TextStyle(fontSize: 13, color: Colors.grey),
+            ),
+            const SizedBox(height: 12),
+            _CardHotKeyDialogCapture(
+              initialHotKey: widget.appSettings.cardHotKeyAt(index),
+              onRecorded: (hotKey) async {
+                await widget.appSettings.setCardHotKey(index, hotKey);
+                widget.onHotKeyChanged();
+                if (ctx.mounted) Navigator.of(ctx).pop();
+              },
+            ),
+          ],
         ),
-        const SizedBox(height: 8),
-        const Text(
-          '用于显示或隐藏主窗口',
-          style: TextStyle(fontSize: 14, color: Colors.grey),
-        ),
-        const SizedBox(height: 16),
-        HotKeyRecorder(
-          initalHotKey: widget.appSettings.hotKey,
-          onHotKeyRecorded: (hotKey) {
-            widget.appSettings.setHotKey(hotKey);
-            widget.onHotKeyChanged();
-          },
-        ),
-        const SizedBox(height: 8),
-        Text(
-          '当前快捷键: $label',
-          style: const TextStyle(fontSize: 14),
-        ),
-      ],
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -262,5 +342,64 @@ class _SettingsPageState extends State<SettingsPage> {
     } finally {
       setState(() => _isBuildingIndex = false);
     }
+  }
+}
+
+/// 仅用于「卡片快捷键」弹窗：单独注册键盘回调，避免与设置页上的 [HotKeyRecorder] 冲突。
+class _CardHotKeyDialogCapture extends StatefulWidget {
+  const _CardHotKeyDialogCapture({
+    required this.initialHotKey,
+    required this.onRecorded,
+  });
+
+  final HotKey initialHotKey;
+  final Future<void> Function(HotKey hotKey) onRecorded;
+
+  @override
+  State<_CardHotKeyDialogCapture> createState() => _CardHotKeyDialogCaptureState();
+}
+
+class _CardHotKeyDialogCaptureState extends State<_CardHotKeyDialogCapture> {
+  late HotKey _current;
+
+  @override
+  void initState() {
+    super.initState();
+    _current = widget.initialHotKey;
+    HardwareKeyboard.instance.addHandler(_handleKeyEvent);
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
+    super.dispose();
+  }
+
+  bool _handleKeyEvent(KeyEvent keyEvent) {
+    if (keyEvent is KeyUpEvent) return false;
+    final physicalKeysPressed = HardwareKeyboard.instance.physicalKeysPressed;
+    final key = keyEvent.physicalKey;
+    List<HotKeyModifier>? modifiers = HotKeyModifier.values
+        .where((e) => e.physicalKeys.any(physicalKeysPressed.contains))
+        .toList();
+    if (modifiers.isNotEmpty) {
+      modifiers = modifiers
+          .where((e) => !e.physicalKeys.contains(key))
+          .toList();
+    }
+    final hotKey = HotKey(
+      identifier: widget.initialHotKey.identifier,
+      key: key,
+      modifiers: modifiers,
+      scope: HotKeyScope.inapp,
+    );
+    setState(() => _current = hotKey);
+    widget.onRecorded(hotKey);
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return HotKeyVirtualView(hotKey: _current);
   }
 }

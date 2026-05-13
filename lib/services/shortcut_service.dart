@@ -7,13 +7,16 @@ class ShortcutService {
   ShortcutService({required this.appSettings});
 
   void Function()? onToggleWindow;
+  bool Function()? shouldHandleCardShortcuts;
+  void Function(int cardIndex)? onCardShortcut;
 
   Future<void> init() async {
     await hotKeyManager.unregisterAll();
-    _registerToggleHotKey();
+    await _registerToggleHotKey();
+    await _registerCardHotKeys();
   }
 
-  void _registerToggleHotKey() async {
+  Future<void> _registerToggleHotKey() async {
     final hotKey = appSettings.hotKey;
     if (hotKey == null) return;
     await hotKeyManager.register(
@@ -22,9 +25,24 @@ class ShortcutService {
     );
   }
 
+  Future<void> _registerCardHotKeys() async {
+    for (var i = 0; i < AppSettings.cardShortcutCount; i++) {
+      final hotKey = appSettings.cardHotKeyAt(i);
+      final index = i;
+      await hotKeyManager.register(
+        hotKey,
+        keyDownHandler: (_) {
+          if (shouldHandleCardShortcuts?.call() != true) return;
+          onCardShortcut?.call(index);
+        },
+      );
+    }
+  }
+
   Future<void> reRegister() async {
     await hotKeyManager.unregisterAll();
-    _registerToggleHotKey();
+    await _registerToggleHotKey();
+    await _registerCardHotKeys();
   }
 
   void dispose() {

@@ -3,11 +3,89 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'base_card.dart';
+import '../pages/card_item_form_page.dart';
+import '../services/user_card_store.dart';
+
+class _QuickAppsItemInteractor implements CardItemInteractor {
+  _QuickAppsItemInteractor(this.card);
+  final QuickAppsCard card;
+
+  @override
+  void onItemTap(CardItem item) {
+    final path = item.data as String;
+    if (path.toLowerCase().endsWith('.lnk')) {
+      Process.run('cmd', ['/c', 'start', '', path], runInShell: true);
+    } else {
+      Process.run(path, [], runInShell: true);
+    }
+  }
+
+  @override
+  void onItemEdit(BuildContext context, CardItem item) {
+    if (!item.isUserEntry || card.userStore == null) return;
+    Navigator.of(context)
+        .push<bool>(
+      MaterialPageRoute(
+        builder: (ctx) => CardItemFormPage(
+          cardIndex: 0,
+          gradient: card.gradient,
+          cardTitle: card.name,
+          userCardStore: card.userStore!,
+          editingItem: item,
+        ),
+      ),
+    )
+        .then((saved) {
+      if (saved == true) card.onUserDataChanged?.call();
+    });
+  }
+
+  @override
+  void onItemDelete(BuildContext context, CardItem item) async {
+    if (!item.isUserEntry || card.userStore == null) return;
+    final path = item.data as String?;
+    if (path == null) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除'),
+        content: Text('确定删除「${item.title}」？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && context.mounted) {
+      await card.userStore!.removeApp(path);
+      card.onUserDataChanged?.call();
+    }
+  }
+}
 
 class QuickAppsCard extends BaseCard {
   final String? indexDirectory;
+  /// 为 null 时（例如仅构建索引）不合并用户自定义应用
+  final UserCardStore? userStore;
 
-  QuickAppsCard({this.indexDirectory});
+  QuickAppsCard({
+    this.indexDirectory,
+    this.userStore,
+    super.onUserDataChanged,
+  });
+
+  @override
+  CardItemInteractor get itemInteractor => _itemInteractor;
+  late final _QuickAppsItemInteractor _itemInteractor =
+      _QuickAppsItemInteractor(this);
+
   @override
   String get name => '快捷应用';
 
@@ -19,8 +97,10 @@ class QuickAppsCard extends BaseCard {
 
   @override
   Future<List<CardItem>> scan() async {
-    final items = <CardItem>[];
-    final seen = <String>{};
+    final userItems =
+        userStore != null ? await userStore!.loadAppCardItems() : <CardItem>[];
+    final items = <CardItem>[...userItems];
+    final seen = <String>{for (final u in userItems) u.data as String};
 
     await _scanStartMenu(items, seen);
     await _scanPathExecutables(items, seen);
@@ -31,34 +111,46 @@ class QuickAppsCard extends BaseCard {
 
   @override
   Future<List<CardItem>> search(String keywords) async {
-    if (indexDirectory == null || keywords.trim().isEmpty) return [];
-    final file = File('$indexDirectory\\apps.json');
-    if (!await file.exists()) return [];
+    final query = keywords.trim().toLowerCase();
+    if (query.isEmpty) return [];
 
-    try {
-      final data = jsonDecode(await file.readAsString()) as List;
-      final query = keywords.trim().toLowerCase();
-      final results = <CardItem>[];
-      final seen = <String>{};
+    final results = <CardItem>[];
+    final seenPaths = <String>{};
 
-      for (final item in data) {
-        final title = item['title'] as String? ?? '';
-        if (title.toLowerCase().contains(query) && seen.add(title)) {
-          final path = item['path'] as String?;
-          results.add(CardItem(
-            title: title,
-            icon: Icons.launch,
-            data: path,
-            iconPath: path,
-          ));
-        }
+    if (indexDirectory != null) {
+      final file = File('$indexDirectory\\apps.json');
+      if (await file.exists()) {
+        try {
+          final data = jsonDecode(await file.readAsString()) as List;
+          final seenTitles = <String>{};
+          for (final item in data) {
+            final title = item['title'] as String? ?? '';
+            if (title.toLowerCase().contains(query) && seenTitles.add(title)) {
+              final path = item['path'] as String?;
+              if (path != null) seenPaths.add(path);
+              results.add(CardItem(
+                title: title,
+                icon: Icons.launch,
+                data: path,
+                iconPath: path,
+              ));
+            }
+          }
+        } catch (_) {}
       }
-
-      results.sort((a, b) => a.title.compareTo(b.title));
-      return results;
-    } catch (_) {
-      return [];
     }
+
+    final userHits =
+        userStore != null ? await userStore!.searchAppsMatching(keywords) : [];
+    for (final u in userHits) {
+      final path = u.data as String?;
+      if (path != null && seenPaths.add(path)) {
+        results.add(u);
+      }
+    }
+
+    results.sort((a, b) => a.title.compareTo(b.title));
+    return results;
   }
 
   Future<void> _scanStartMenu(List<CardItem> items, Set<String> seen) async {
@@ -145,15 +237,5 @@ class QuickAppsCard extends BaseCard {
     name = name.replaceAll(RegExp(r'\s*\(.*?\)\s*$'), '');
     name = name.replaceAll(RegExp(r'[\s\-_]+$'), '');
     return name;
-  }
-
-  @override
-  void onItemTap(CardItem item) {
-    final path = item.data as String;
-    if (path.toLowerCase().endsWith('.lnk')) {
-      Process.run('cmd', ['/c', 'start', '', path], runInShell: true);
-    } else {
-      Process.run(path, [], runInShell: true);
-    }
   }
 }

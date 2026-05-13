@@ -10,7 +10,7 @@ class IndexService {
   IndexService({required this.appSettings});
 
   Future<int> buildIndex() async {
-    final card = QuickAppsCard();
+    final card = QuickAppsCard(indexDirectory: appSettings.indexDirectory);
     final items = await card.scan();
 
     final data = items.map((item) => {
