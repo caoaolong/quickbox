@@ -82,7 +82,8 @@ jobs:
           if [ -z "$APP" ]; then echo "macOS build output not found"; exit 1; fi
           echo "Found: $APP"
           version="${GITHUB_REF_NAME#v}"
-          hdiutil create -volname "QuickBox" -srcfolder "$APP" -ov -format UDZO "QuickBox-$version.dmg"
+          chmod +x macos/build_dmg.sh
+          ./macos/build_dmg.sh "$APP" "$version"
       - uses: actions/upload-artifact@v4
         with:
           name: quickbox-macos
