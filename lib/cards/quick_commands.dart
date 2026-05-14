@@ -11,35 +11,10 @@ class _QuickCommandsItemInteractor implements CardItemInteractor {
 
   @override
   void onItemTap(CardItem item) {
-    if (item.isUserEntry) {
-      final cmd = item.data as String?;
-      if (cmd != null && cmd.isNotEmpty) {
-        Process.run('cmd', ['/c', cmd], runInShell: true);
-      }
-      return;
-    }
-    final id = item.data as String?;
-    if (id == null) return;
-    switch (id) {
-      case 'empty_trash':
-        Process.run('cmd', ['/c', 'rd', '/s', '/q', r'%systemdrive%\$Recycle.Bin'],
-            runInShell: true);
-        break;
-      case 'screenshot':
-        Process.run('cmd', ['/c', 'snippingtool'], runInShell: true);
-        break;
-      case 'task_manager':
-        Process.run('taskmgr', [], runInShell: true);
-        break;
-      case 'lock_screen':
-        Process.run('cmd', ['/c', 'rundll32.exe', 'user32.dll,LockWorkStation'],
-            runInShell: true);
-        break;
-      case 'sleep':
-        Process.run(
-            'cmd', ['/c', 'rundll32.exe', 'powrprof.dll,SetSuspendState', '0,1,0'],
-            runInShell: true);
-        break;
+    if (!item.isUserEntry) return;
+    final cmd = item.data as String?;
+    if (cmd != null && cmd.isNotEmpty) {
+      Process.run('cmd', ['/c', cmd], runInShell: true);
     }
   }
 
@@ -117,26 +92,6 @@ class QuickCommandsCard extends BaseCard {
 
   @override
   Future<List<CardItem>> scan() async {
-    final user = await userStore.loadCommandCardItems();
-    return [
-      ...user,
-      const CardItem(
-        title: '清空回收站',
-        icon: Icons.delete_sweep,
-        data: 'empty_trash',
-      ),
-      const CardItem(title: '截屏', icon: Icons.screenshot, data: 'screenshot'),
-      const CardItem(
-        title: '打开任务管理器',
-        icon: Icons.settings,
-        data: 'task_manager',
-      ),
-      const CardItem(title: '锁定屏幕', icon: Icons.lock, data: 'lock_screen'),
-      const CardItem(
-        title: '休眠',
-        icon: Icons.power_settings_new,
-        data: 'sleep',
-      ),
-    ];
+    return userStore.loadCommandCardItems();
   }
 }

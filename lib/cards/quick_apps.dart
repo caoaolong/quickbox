@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'base_card.dart';
 import '../pages/card_item_form_page.dart';
+import '../services/hybrid_search/hybrid_search_engine.dart';
 import '../services/user_card_store.dart';
 
 class _QuickAppsItemInteractor implements CardItemInteractor {
@@ -81,6 +82,14 @@ class QuickAppsCard extends BaseCard {
     super.onUserDataChanged,
   });
 
+  String? _searchPoolFp;
+  List<CardItem>? _searchPoolItems;
+
+  void invalidateSearchPoolCache() {
+    _searchPoolFp = null;
+    _searchPoolItems = null;
+  }
+
   @override
   CardItemInteractor get itemInteractor => _itemInteractor;
   late final _QuickAppsItemInteractor _itemInteractor =
@@ -109,11 +118,44 @@ class QuickAppsCard extends BaseCard {
     return items;
   }
 
-  @override
-  Future<List<CardItem>> search(String keywords) async {
-    final query = keywords.trim().toLowerCase();
-    if (query.isEmpty) return [];
+  Future<String> _computeSearchPoolFingerprint() async {
+    final parts = <String>[];
+    if (indexDirectory != null) {
+      final f = File('$indexDirectory\\apps.json');
+      if (await f.exists()) {
+        final st = await f.stat();
+        parts.add(
+          'apps:${st.modified.millisecondsSinceEpoch}:${st.size}',
+        );
+      } else {
+        parts.add('apps:missing');
+      }
+    } else {
+      parts.add('apps:noidx');
+    }
+    if (userStore != null) {
+      final uf = File(userStore!.appSettings.userEntriesPath);
+      if (await uf.exists()) {
+        final st = await uf.stat();
+        parts.add(
+          'user:${st.modified.millisecondsSinceEpoch}:${st.size}',
+        );
+      } else {
+        parts.add('user:missing');
+      }
+    } else {
+      parts.add('user:none');
+    }
+    return parts.join('|');
+  }
 
+  /// 参与全局 / 本地 Hybrid 搜索的应用池（JSON + 用户应用，按路径去重）。
+  @override
+  Future<List<CardItem>> loadSearchItemPool() async {
+    final fp = await _computeSearchPoolFingerprint();
+    if (_searchPoolFp == fp && _searchPoolItems != null) {
+      return _searchPoolItems!;
+    }
     final results = <CardItem>[];
     final seenPaths = <String>{};
 
@@ -122,12 +164,11 @@ class QuickAppsCard extends BaseCard {
       if (await file.exists()) {
         try {
           final data = jsonDecode(await file.readAsString()) as List;
-          final seenTitles = <String>{};
           for (final item in data) {
             final title = item['title'] as String? ?? '';
-            if (title.toLowerCase().contains(query) && seenTitles.add(title)) {
-              final path = item['path'] as String?;
-              if (path != null) seenPaths.add(path);
+            final path = item['path'] as String?;
+            if (path == null || path.isEmpty) continue;
+            if (seenPaths.add(path)) {
               results.add(CardItem(
                 title: title,
                 icon: Icons.launch,
@@ -140,17 +181,24 @@ class QuickAppsCard extends BaseCard {
       }
     }
 
-    final userHits =
-        userStore != null ? await userStore!.searchAppsMatching(keywords) : [];
-    for (final u in userHits) {
+    final userItems =
+        userStore != null ? await userStore!.loadAppCardItems() : <CardItem>[];
+    for (final u in userItems) {
       final path = u.data as String?;
       if (path != null && seenPaths.add(path)) {
         results.add(u);
       }
     }
 
-    results.sort((a, b) => a.title.compareTo(b.title));
+    _searchPoolFp = fp;
+    _searchPoolItems = results;
     return results;
+  }
+
+  @override
+  Future<List<CardItem>> search(String keywords) async {
+    final pool = await loadSearchItemPool();
+    return HybridSearch.sortCardItems(keywords, pool);
   }
 
   Future<void> _scanStartMenu(List<CardItem> items, Set<String> seen) async {

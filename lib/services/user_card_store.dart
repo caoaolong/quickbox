@@ -1,15 +1,37 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' show Random;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import '../cards/base_card.dart';
 import 'app_settings.dart';
+import 'hybrid_search/hybrid_search_engine.dart';
+
+/// 笔记条目类型（与 JSON 中 kind 字段一致）
+abstract final class NoteKind {
+  static const account = 'account';
+  static const token = 'token';
+  static const note = 'note';
+}
 
 /// 持久化各卡片中用户通过「新建」添加的条目
 class UserCardStore {
-  UserCardStore({required this.appSettings});
+  UserCardStore({required this.appSettings, this.onAfterPersist});
 
   final AppSettings appSettings;
+
+  /// 在 [_saveRoot] 写入成功后调用（如云同步防抖上传）；云合并导入时会暂时抑制。
+  void Function()? onAfterPersist;
+
+  bool _suppressAfterPersist = false;
+
+  /// 云同步涉及的 `user_entries.json` 顶层键（不含快捷应用 `apps`）。
+  static const List<String> cloudSyncSectionKeys = [
+    'web',
+    'commands',
+    'notes',
+  ];
 
   File get _file => File(appSettings.userEntriesPath);
 
@@ -44,6 +66,9 @@ class UserCardStore {
   Future<void> _saveRoot(Map<String, dynamic> root) async {
     await _file.parent.create(recursive: true);
     await _file.writeAsString(const JsonEncoder.withIndent('  ').convert(root));
+    if (!_suppressAfterPersist) {
+      onAfterPersist?.call();
+    }
   }
 
   static List<String> _tagsFromJson(dynamic raw) {
@@ -82,20 +107,11 @@ class UserCardStore {
   }
 
   Future<List<CardItem>> searchAppsMatching(String query) async {
-    final q = query.trim().toLowerCase();
-    if (q.isEmpty) return [];
     final items = await loadAppCardItems();
-    return items.where((it) {
-      if (it.title.toLowerCase().contains(q)) return true;
-      if ((it.subtitle ?? '').toLowerCase().contains(q)) return true;
-      for (final t in it.tags) {
-        if (t.toLowerCase().contains(q)) return true;
-      }
-      return false;
-    }).toList();
+    return HybridSearch.sortCardItems(query, items);
   }
 
-  Future<void> addApp({required String path, required List<String> tags}) async {
+  Future<void> addApp({required String path, List<String> tags = const []}) async {
     final root = await _loadRoot();
     (root['apps'] as List<dynamic>).add({
       'path': path,
@@ -117,12 +133,20 @@ class UserCardStore {
       try {
         uri = Uri.parse(url);
       } catch (_) {}
-      final title = uri?.host.isNotEmpty == true ? uri!.host : url;
+      final host = uri?.host.isNotEmpty == true ? uri!.host : url;
+      final title = (e['fetchedTitle'] as String?)?.isNotEmpty == true
+          ? e['fetchedTitle'] as String
+          : host;
+      final faviconBase64 = e['faviconBase64'] as String?;
+      final iconBytes = (faviconBase64 != null && faviconBase64.isNotEmpty)
+          ? base64Decode(faviconBase64)
+          : null;
       out.add(CardItem(
         title: title,
         subtitle: tags.isEmpty ? url : '${tags.join(', ')}\n$url',
         icon: Icons.public,
         data: url,
+        iconBytes: iconBytes,
         isUserEntry: true,
         tags: tags,
       ));
@@ -130,12 +154,24 @@ class UserCardStore {
     return out;
   }
 
-  Future<void> addWeb({required String url, required List<String> tags}) async {
+  Future<void> addWeb({
+    required String url,
+    List<String> tags = const [],
+    String? fetchedTitle,
+    Uint8List? faviconBytes,
+  }) async {
     final root = await _loadRoot();
-    (root['web'] as List<dynamic>).add({
+    final entry = <String, dynamic>{
       'url': url,
       'tags': tags,
-    });
+    };
+    if (fetchedTitle != null && fetchedTitle.isNotEmpty) {
+      entry['fetchedTitle'] = fetchedTitle;
+    }
+    if (faviconBytes != null && faviconBytes.isNotEmpty) {
+      entry['faviconBase64'] = base64Encode(faviconBytes);
+    }
+    (root['web'] as List<dynamic>).add(entry);
     await _saveRoot(root);
   }
 
@@ -162,7 +198,7 @@ class UserCardStore {
     return out;
   }
 
-  Future<void> addCommand({required String command, required List<String> tags}) async {
+  Future<void> addCommand({required String command, List<String> tags = const []}) async {
     final root = await _loadRoot();
     (root['commands'] as List<dynamic>).add({
       'command': command,
@@ -171,23 +207,91 @@ class UserCardStore {
     await _saveRoot(root);
   }
 
+  static final _noteRandom = Random();
+
+  String _allocateNoteId() =>
+      '${DateTime.now().microsecondsSinceEpoch}_${_noteRandom.nextInt(1 << 30)}';
+
+  /// 将旧版仅含 content 的笔记迁为带 id、kind 的结构。
+  Future<void> _migrateNotesIfNeeded(Map<String, dynamic> root) async {
+    final list = root['notes'] as List<dynamic>;
+    var changed = false;
+    for (var i = 0; i < list.length; i++) {
+      final raw = list[i];
+      if (raw is! Map) continue;
+      final e = Map<String, dynamic>.from(raw);
+      final id = e['id']?.toString();
+      if (id == null || id.isEmpty) {
+        e['id'] = _allocateNoteId();
+        changed = true;
+      }
+      final kind = e['kind']?.toString();
+      if (kind == null || kind.isEmpty) {
+        final content = e['content']?.toString() ?? '';
+        e['kind'] = NoteKind.note;
+        e['noteContent'] = content;
+        var t = content.split(RegExp(r'[\r\n]')).first.trim();
+        if (t.length > 40) t = '${t.substring(0, 37)}…';
+        e['title'] = t;
+        e.remove('content');
+        changed = true;
+      }
+      list[i] = e;
+    }
+    if (changed) {
+      await _saveRoot(root);
+    }
+  }
+
   Future<List<CardItem>> loadNoteCardItems() async {
     final root = await _loadRoot();
+    await _migrateNotesIfNeeded(root);
     final list = root['notes'] as List<dynamic>;
     final out = <CardItem>[];
-    for (final e in list) {
-      if (e is! Map) continue;
-      final content = e['content'] as String? ?? '';
-      if (content.isEmpty) continue;
+    for (final raw in list) {
+      if (raw is! Map) continue;
+      final e = Map<String, dynamic>.from(raw);
+      final id = e['id']?.toString();
+      if (id == null || id.isEmpty) continue;
+      final kind = e['kind']?.toString() ?? NoteKind.note;
       final tags = _tagsFromJson(e['tags']);
-      var firstLine = content.split(RegExp(r'[\r\n]')).first.trim();
-      if (firstLine.length > 40) firstLine = '${firstLine.substring(0, 37)}…';
-      final title = firstLine.isEmpty ? '（无标题）' : firstLine;
+
+      late final String title;
+      late final String? subtitle;
+      late final IconData iconData;
+
+      switch (kind) {
+        case NoteKind.account:
+          final an = e['accountName']?.toString().trim() ?? '';
+          final un = e['userName']?.toString().trim() ?? '';
+          title = an.isEmpty ? '（无账户名）' : an;
+          subtitle = un.isEmpty ? null : '用户：$un';
+          iconData = Icons.person_outline;
+          break;
+        case NoteKind.token:
+          final an = e['accountName']?.toString().trim() ?? '';
+          title = an.isEmpty ? '（无账户名）' : an;
+          subtitle = 'Token';
+          iconData = Icons.key_outlined;
+          break;
+        default:
+          final body = e['noteContent']?.toString() ?? '';
+          if (body.trim().isEmpty) continue;
+          var nt = e['title']?.toString().trim() ?? '';
+          if (nt.isEmpty) {
+            nt = '（无标题）';
+          }
+          title = nt;
+          subtitle = tags.isEmpty ? null : tags.join(', ');
+          iconData = Icons.note_outlined;
+          break;
+      }
+
       out.add(CardItem(
         title: title,
-        subtitle: tags.isEmpty ? null : tags.join(', '),
-        icon: Icons.note,
-        data: content,
+        subtitle: subtitle,
+        icon: iconData,
+        data: jsonEncode(e),
         isUserEntry: true,
         tags: tags,
       ));
@@ -195,12 +299,13 @@ class UserCardStore {
     return out;
   }
 
-  Future<void> addNote({required String content, required List<String> tags}) async {
+  Future<void> addNoteEntry(Map<String, dynamic> fields) async {
     final root = await _loadRoot();
-    (root['notes'] as List<dynamic>).add({
-      'content': content,
-      'tags': tags,
-    });
+    final e = Map<String, dynamic>.from(fields);
+    e['id'] = _allocateNoteId();
+    e['tags'] = _tagsFromJson(e['tags']);
+    e['kind'] = e['kind']?.toString() ?? NoteKind.note;
+    (root['notes'] as List<dynamic>).add(e);
     await _saveRoot(root);
   }
 
@@ -214,7 +319,7 @@ class UserCardStore {
   Future<void> updateApp({
     required String oldPath,
     required String path,
-    required List<String> tags,
+    List<String> tags = const [],
   }) async {
     final root = await _loadRoot();
     final list = root['apps'] as List<dynamic>;
@@ -238,14 +343,25 @@ class UserCardStore {
   Future<void> updateWeb({
     required String oldUrl,
     required String url,
-    required List<String> tags,
+    List<String> tags = const [],
+    String? fetchedTitle,
+    Uint8List? faviconBytes,
   }) async {
     final root = await _loadRoot();
     final list = root['web'] as List<dynamic>;
     for (var i = 0; i < list.length; i++) {
       final e = list[i];
       if (e is Map && (e['url'] as String?) == oldUrl) {
-        list[i] = {'url': url, 'tags': tags};
+        list[i] = <String, dynamic>{
+          'url': url,
+          'tags': tags,
+        };
+        if (fetchedTitle != null && fetchedTitle.isNotEmpty) {
+          (list[i] as Map)['fetchedTitle'] = fetchedTitle;
+        }
+        if (faviconBytes != null && faviconBytes.isNotEmpty) {
+          (list[i] as Map)['faviconBase64'] = base64Encode(faviconBytes);
+        }
         break;
       }
     }
@@ -262,7 +378,7 @@ class UserCardStore {
   Future<void> updateCommand({
     required String oldCommand,
     required String command,
-    required List<String> tags,
+    List<String> tags = const [],
   }) async {
     final root = await _loadRoot();
     final list = root['commands'] as List<dynamic>;
@@ -276,27 +392,68 @@ class UserCardStore {
     await _saveRoot(root);
   }
 
-  Future<void> removeNote(String content) async {
+  Future<void> removeNoteById(String id) async {
     final root = await _loadRoot();
-    (root['notes'] as List<dynamic>).removeWhere(
-        (e) => e is Map && (e['content'] as String?) == content);
+    (root['notes'] as List<dynamic>)
+        .removeWhere((e) => e is Map && e['id']?.toString() == id);
     await _saveRoot(root);
   }
 
   Future<void> updateNote({
-    required String oldContent,
-    required String content,
-    required List<String> tags,
+    required String id,
+    required Map<String, dynamic> fields,
   }) async {
     final root = await _loadRoot();
     final list = root['notes'] as List<dynamic>;
     for (var i = 0; i < list.length; i++) {
-      final e = list[i];
-      if (e is Map && (e['content'] as String?) == oldContent) {
-        list[i] = {'content': content, 'tags': tags};
-        break;
+      final raw = list[i];
+      if (raw is! Map) continue;
+      final existing = Map<String, dynamic>.from(raw);
+      if (existing['id']?.toString() != id) continue;
+      final next = Map<String, dynamic>.from(fields);
+      next['id'] = id;
+      next['kind'] = fields['kind']?.toString() ?? existing['kind'] ?? NoteKind.note;
+      if (fields.containsKey('tags')) {
+        next['tags'] = _tagsFromJson(fields['tags']);
+      } else {
+        next['tags'] = _tagsFromJson(existing['tags']);
+      }
+      list[i] = next;
+      await _saveRoot(root);
+      return;
+    }
+  }
+
+  /// 导出供云同步上传的数据（仅网页快开、快捷指令、快速笔记；不含快捷应用 `apps`）。
+  Future<Map<String, dynamic>> exportCloudSyncPayload() async {
+    final root = await _loadRoot();
+    final out = <String, dynamic>{};
+    for (final key in cloudSyncSectionKeys) {
+      final raw = root[key];
+      if (raw is List) {
+        out[key] = jsonDecode(jsonEncode(raw)) as List<dynamic>;
+      } else {
+        out[key] = <dynamic>[];
       }
     }
-    await _saveRoot(root);
+    return out;
+  }
+
+  /// 将云同步下载结果合并写回本地；仅更新 [cloudSyncSectionKeys]，`apps` 保持不变。
+  Future<void> importCloudSyncPayload(Map<String, dynamic> payload) async {
+    _suppressAfterPersist = true;
+    try {
+      final root = await _loadRoot();
+      for (final key in cloudSyncSectionKeys) {
+        final v = payload[key];
+        if (v is List) {
+          root[key] = jsonDecode(jsonEncode(v)) as List<dynamic>;
+        }
+      }
+      await _migrateNotesIfNeeded(root);
+      await _saveRoot(root);
+    } finally {
+      _suppressAfterPersist = false;
+    }
   }
 }

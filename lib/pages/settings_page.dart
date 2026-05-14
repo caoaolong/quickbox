@@ -4,16 +4,22 @@ import 'package:file_picker/file_picker.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import '../services/app_settings.dart';
+import '../services/cloud_sync_service.dart';
 import '../services/index_service.dart';
+import '../services/user_card_store.dart';
 
 class SettingsPage extends StatefulWidget {
   final AppSettings appSettings;
   final VoidCallback onHotKeyChanged;
+  final UserCardStore userCardStore;
+  final VoidCallback onCloudSyncApplied;
 
   const SettingsPage({
     super.key,
     required this.appSettings,
     required this.onHotKeyChanged,
+    required this.userCardStore,
+    required this.onCloudSyncApplied,
   });
 
   @override
@@ -77,6 +83,10 @@ class _SettingsPageState extends State<SettingsPage> {
                 icon: Icon(Icons.storage),
                 label: Text('数据'),
               ),
+              NavigationRailDestination(
+                icon: Icon(Icons.cloud_sync),
+                label: Text('云同步'),
+              ),
             ],
           ),
           const VerticalDivider(width: 1),
@@ -99,6 +109,12 @@ class _SettingsPageState extends State<SettingsPage> {
         return _buildHotKeyTab();
       case 2:
         return _buildDataTab();
+      case 3:
+        return _CloudSyncTab(
+          appSettings: widget.appSettings,
+          userCardStore: widget.userCardStore,
+          onCloudSyncApplied: widget.onCloudSyncApplied,
+        );
       default:
         return const SizedBox.shrink();
     }
@@ -142,6 +158,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _buildHotKeyTab() {
     final label = widget.appSettings.hotKeyLabel();
+    final centerLabel = widget.appSettings.centerHotKeyLabel();
 
     return SingleChildScrollView(
       child: Column(
@@ -167,6 +184,29 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 8),
           Text(
             '当前快捷键: $label',
+            style: const TextStyle(fontSize: 14),
+          ),
+          const SizedBox(height: 32),
+          const Text(
+            '居中窗口',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '将主窗口移回屏幕中心位置',
+            style: TextStyle(fontSize: 14, color: Colors.grey),
+          ),
+          const SizedBox(height: 16),
+          HotKeyRecorder(
+            initalHotKey: widget.appSettings.centerHotKey,
+            onHotKeyRecorded: (hotKey) {
+              widget.appSettings.setCenterHotKey(hotKey);
+              widget.onHotKeyChanged();
+            },
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '当前快捷键: $centerLabel',
             style: const TextStyle(fontSize: 14),
           ),
           const SizedBox(height: 32),
@@ -252,6 +292,8 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Widget _buildDataTab() {
+    final dataRoot = widget.appSettings.dataRoot;
+    final indexDir = widget.appSettings.indexDirectory;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -259,12 +301,17 @@ class _SettingsPageState extends State<SettingsPage> {
           '数据管理',
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 12),
         const Text(
-          '索引目录',
+          '数据存放位置',
           style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 6),
+        Text(
+          '应用索引与用户条目将保存在该文件夹内（含 index 子目录与 user_entries.json）。',
+          style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+        ),
+        const SizedBox(height: 10),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
@@ -275,19 +322,28 @@ class _SettingsPageState extends State<SettingsPage> {
             children: [
               Expanded(
                 child: Text(
-                  widget.appSettings.indexDirectory.isEmpty
-                      ? '未选择目录'
-                      : widget.appSettings.indexDirectory,
+                  dataRoot.isEmpty ? '未设置' : dataRoot,
                   style: const TextStyle(fontSize: 13),
                 ),
               ),
               TextButton(
-                onPressed: _pickDirectory,
-                child: const Text('选择'),
+                onPressed: _pickDataRoot,
+                child: const Text('选择文件夹'),
               ),
             ],
           ),
         ),
+        if (indexDir.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          Text(
+            '索引目录：$indexDir',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+          ),
+          Text(
+            '用户数据：${widget.appSettings.userEntriesPath}',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+          ),
+        ],
         const SizedBox(height: 24),
         SizedBox(
           width: double.infinity,
@@ -316,10 +372,10 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Future<void> _pickDirectory() async {
+  Future<void> _pickDataRoot() async {
     final result = await FilePicker.platform.getDirectoryPath();
     if (result != null) {
-      await widget.appSettings.setIndexDirectory(result);
+      await widget.appSettings.setDataRoot(result);
     }
   }
 
@@ -342,6 +398,238 @@ class _SettingsPageState extends State<SettingsPage> {
     } finally {
       setState(() => _isBuildingIndex = false);
     }
+  }
+}
+
+/// S3 兼容 OSS 配置与同步操作。
+class _CloudSyncTab extends StatefulWidget {
+  const _CloudSyncTab({
+    required this.appSettings,
+    required this.userCardStore,
+    required this.onCloudSyncApplied,
+  });
+
+  final AppSettings appSettings;
+  final UserCardStore userCardStore;
+  final VoidCallback onCloudSyncApplied;
+
+  @override
+  State<_CloudSyncTab> createState() => _CloudSyncTabState();
+}
+
+class _CloudSyncTabState extends State<_CloudSyncTab> {
+  late bool _enabled;
+  late bool _pathStyle;
+  late final TextEditingController _endpoint;
+  late final TextEditingController _region;
+  late final TextEditingController _bucket;
+  late final TextEditingController _accessKey;
+  late final TextEditingController _secret;
+  late final TextEditingController _prefix;
+  bool _obscureSecret = true;
+  bool _downloading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _enabled = widget.appSettings.cloudSyncEnabled;
+    _pathStyle = widget.appSettings.s3PathStyle;
+    _endpoint = TextEditingController(text: widget.appSettings.s3Endpoint);
+    _region = TextEditingController(text: widget.appSettings.s3Region);
+    _bucket = TextEditingController(text: widget.appSettings.s3Bucket);
+    _accessKey = TextEditingController(text: widget.appSettings.s3AccessKeyId);
+    _secret = TextEditingController(text: widget.appSettings.s3SecretAccessKey);
+    _prefix = TextEditingController(text: widget.appSettings.s3Prefix);
+  }
+
+  @override
+  void dispose() {
+    _endpoint.dispose();
+    _region.dispose();
+    _bucket.dispose();
+    _accessKey.dispose();
+    _secret.dispose();
+    _prefix.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final endpoint = _endpoint.text.trim();
+    final bucket = _bucket.text.trim();
+    if (_enabled && (endpoint.isEmpty || bucket.isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('开启云同步时请填写 Endpoint 与 Bucket')),
+      );
+      return;
+    }
+    await widget.appSettings.setCloudSyncConfig(
+      enabled: _enabled,
+      endpoint: _endpoint.text,
+      region: _region.text,
+      bucket: _bucket.text,
+      accessKeyId: _accessKey.text,
+      secretAccessKey: _secret.text,
+      prefix: _prefix.text,
+      pathStyle: _pathStyle,
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('云同步设置已保存')),
+    );
+  }
+
+  Future<void> _downloadFromCloud() async {
+    if (_downloading) return;
+    final sync = CloudSyncService(appSettings: widget.appSettings);
+    if (!sync.canRunSync) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('请先保存：开启云同步并填写 Endpoint、Bucket 与访问密钥'),
+        ),
+      );
+      return;
+    }
+    setState(() => _downloading = true);
+    try {
+      await sync.downloadAndApply(widget.userCardStore);
+      widget.onCloudSyncApplied();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已从云端合并到本地')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('下载失败：$e')),
+      );
+    } finally {
+      if (mounted) setState(() => _downloading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '云同步',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '兼容 Amazon S3 API 的对象存储（如阿里云 OSS、腾讯云 COS、MinIO 等）。'
+            '开启并保存后：应用启动时会自动从云端合并一次；本地「网页快开、快捷指令、快速笔记」变更会在约 2 秒后自动上传；'
+            '也可在下方手动从云端下载。'
+            '不含「快捷应用」条目。'
+            '密钥保存在本机 SharedPreferences，请注意设备安全。',
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+          ),
+          const SizedBox(height: 16),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('启用云同步'),
+            value: _enabled,
+            onChanged: (v) => setState(() => _enabled = v),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _endpoint,
+            decoration: const InputDecoration(
+              labelText: 'Endpoint',
+              hintText: '例如 https://oss-cn-hangzhou.aliyuncs.com',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _region,
+            decoration: const InputDecoration(
+              labelText: 'Region',
+              hintText: '例如 oss-cn-hangzhou',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _bucket,
+            decoration: const InputDecoration(
+              labelText: 'Bucket',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _accessKey,
+            decoration: const InputDecoration(
+              labelText: 'Access Key ID',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _secret,
+            obscureText: _obscureSecret,
+            decoration: InputDecoration(
+              labelText: 'Secret Access Key',
+              border: const OutlineInputBorder(),
+              suffixIcon: IconButton(
+                icon: Icon(
+                  _obscureSecret ? Icons.visibility : Icons.visibility_off,
+                ),
+                onPressed: () => setState(() => _obscureSecret = !_obscureSecret),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _prefix,
+            decoration: const InputDecoration(
+              labelText: '对象键前缀（可选）',
+              hintText: '例如 quickbox/',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('路径风格（Path-Style）'),
+            subtitle: Text(
+              '部分自建或 MinIO 部署需要开启；公有云 OSS 一般关闭。',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+            value: _pathStyle,
+            onChanged: (v) => setState(() => _pathStyle = v),
+          ),
+          const SizedBox(height: 20),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: _downloading ? null : _downloadFromCloud,
+              icon: _downloading
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.cloud_download_outlined),
+              label: Text(_downloading ? '正在下载…' : '从云端下载（使用已保存的配置）'),
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: _save,
+              icon: const Icon(Icons.save),
+              label: const Text('保存'),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

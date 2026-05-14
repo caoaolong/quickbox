@@ -1,11 +1,14 @@
+import 'dart:async';
 import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'services/app_settings.dart';
+import 'services/cloud_sync_service.dart';
 import 'services/user_card_store.dart';
 import 'pages/settings_page.dart';
 import 'pages/card_item_form_page.dart';
@@ -15,7 +18,32 @@ import 'cards/web_quick_open.dart';
 import 'cards/quick_commands.dart';
 import 'cards/quick_notes.dart';
 import 'cards/icon_extractor.dart';
+import 'services/hybrid_search/hybrid_search_engine.dart';
 import 'services/shortcut_service.dart';
+
+/// 不绘制滚动条，保留滚轮、触控板与拖拽滚动。
+class NoScrollbarScrollBehavior extends MaterialScrollBehavior {
+  const NoScrollbarScrollBehavior();
+
+  @override
+  Widget buildScrollbar(
+    BuildContext context,
+    Widget child,
+    ScrollableDetails details,
+  ) {
+    return child;
+  }
+
+  @override
+  Set<PointerDeviceKind> get dragDevices => {
+        PointerDeviceKind.touch,
+        PointerDeviceKind.mouse,
+        PointerDeviceKind.trackpad,
+        PointerDeviceKind.stylus,
+        PointerDeviceKind.invertedStylus,
+        PointerDeviceKind.unknown,
+      };
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -31,6 +59,7 @@ void main() async {
     titleBarStyle: TitleBarStyle.hidden,
     windowButtonVisibility: false,
     center: true,
+    alwaysOnTop: true,
   );
 
   windowManager.waitUntilReadyToShow(windowOptions, () async {
@@ -55,6 +84,7 @@ class QuickBoxApp extends StatelessWidget {
         return MaterialApp(
           title: 'Quick Box',
           debugShowCheckedModeBanner: false,
+          scrollBehavior: const NoScrollbarScrollBehavior(),
           themeMode: appSettings.themeMode,
           theme: ThemeData(
             colorSchemeSeed: Colors.blue,
@@ -71,6 +101,12 @@ class QuickBoxApp extends StatelessWidget {
   }
 }
 
+class _SearchResult {
+  final CardItem item;
+  final int cardIndex;
+  const _SearchResult(this.item, this.cardIndex);
+}
+
 class QuickBox extends StatefulWidget {
   final AppSettings appSettings;
 
@@ -85,12 +121,15 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
   int _selectedCardIndex = -1;
   List<CardItem> _cardItems = [];
   bool _isLoading = false;
+  int _displayedItemCount = 0;
+  final _cardListScrollController = ScrollController();
   String _searchQuery = '';
-  List<CardItem> _searchResults = [];
+  List<_SearchResult> _searchResults = [];
   int _selectedSearchIndex = -1;
   final List<GlobalKey> _searchResultKeys = [];
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode(debugLabel: 'search');
+  Timer? _cloudUploadTimer;
 
   late final List<BaseCard> _cards;
   late final UserCardStore _userCardStore;
@@ -120,6 +159,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       ),
     ];
     _searchController.addListener(_onSearchChanged);
+    _cardListScrollController.addListener(_onCardListScroll);
     trayManager.addListener(this);
     windowManager.addListener(this);
     _initTray();
@@ -127,6 +167,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
 
     _shortcutService = ShortcutService(appSettings: widget.appSettings);
     _shortcutService.onToggleWindow = _toggleWindow;
+    _shortcutService.onCenterWindow = _centerWindow;
     _shortcutService.shouldHandleCardShortcuts =
         () => !_isOnSettingsPage && mounted;
     _shortcutService.onCardShortcut = (index) {
@@ -134,6 +175,43 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       _openCard(index);
     };
     _shortcutService.init();
+
+    _userCardStore.onAfterPersist = _scheduleDebouncedCloudUpload;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _runStartupCloudDownload();
+    });
+  }
+
+  void _scheduleDebouncedCloudUpload() {
+    if (!widget.appSettings.cloudSyncEnabled) return;
+    _cloudUploadTimer?.cancel();
+    _cloudUploadTimer = Timer(const Duration(seconds: 2), () {
+      _cloudUploadTimer = null;
+      _uploadCloudSnapshot();
+    });
+  }
+
+  Future<void> _uploadCloudSnapshot() async {
+    if (!mounted) return;
+    final sync = CloudSyncService(appSettings: widget.appSettings);
+    if (!sync.canRunSync) return;
+    try {
+      await sync.upload(_userCardStore);
+    } catch (e, st) {
+      debugPrint('云同步上传失败: $e\n$st');
+    }
+  }
+
+  Future<void> _runStartupCloudDownload() async {
+    if (!mounted) return;
+    final sync = CloudSyncService(appSettings: widget.appSettings);
+    if (!sync.canRunSync) return;
+    try {
+      await sync.downloadAndApply(_userCardStore);
+      if (mounted) _onUserCardDataChanged();
+    } catch (e, st) {
+      debugPrint('启动时云同步下载失败: $e\n$st');
+    }
   }
 
   void _toggleWindow() async {
@@ -141,10 +219,15 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       await windowManager.hide();
     } else {
       setState(() => _isOnSettingsPage = false);
+      await windowManager.setSize(const Size(800, 400));
       await windowManager.show();
       await windowManager.focus();
       _focusSearchField();
     }
+  }
+
+  void _centerWindow() async {
+    await windowManager.center();
   }
 
   void _focusSearchField() {
@@ -156,12 +239,42 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
 
   void _onUserCardDataChanged() {
     if (!mounted) return;
+    (_cards[0] as QuickAppsCard).invalidateSearchPoolCache();
     if (_selectedCardIndex >= 0) {
       _openCard(_selectedCardIndex);
     }
     if (_searchQuery.trim().isNotEmpty) {
       _performSearch(_searchController.text);
     }
+  }
+
+  Widget? _userEntryDeleteOnly(
+    BuildContext context,
+    BaseCard card,
+    CardItem item,
+  ) {
+    if (!item.isUserEntry) return null;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.edit_outlined, color: Colors.white70, size: 22),
+          tooltip: '编辑',
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 38, minHeight: 40),
+          onPressed: () => card.itemInteractor.onItemEdit(context, item),
+        ),
+        IconButton(
+          icon: const Icon(Icons.delete_outline, color: Colors.white70, size: 22),
+          tooltip: '删除',
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 38, minHeight: 40),
+          onPressed: () => card.itemInteractor.onItemDelete(context, item),
+        ),
+      ],
+    );
   }
 
   Widget? _userEntryTrailing(
@@ -212,7 +325,25 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
   }
 
   Future<void> _performSearch(String query) async {
-    final results = await _cards[0].search(query);
+    final results = <_SearchResult>[];
+
+    final flat = <({CardItem item, int cardIndex})>[];
+    final appPool = await _cards[0].loadSearchItemPool();
+    for (final item in appPool) {
+      flat.add((item: item, cardIndex: 0));
+    }
+    for (var i = 1; i < _cards.length; i++) {
+      final items = await _cards[i].loadSearchItemPool();
+      for (final item in items) {
+        flat.add((item: item, cardIndex: i));
+      }
+    }
+
+    final ranked = HybridSearch.rankCardEntries(query, flat);
+    for (final e in ranked) {
+      results.add(_SearchResult(e.item, e.cardIndex));
+    }
+
     if (!mounted || _searchController.text != query) return;
     setState(() {
       _searchResults = results;
@@ -248,6 +379,13 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
         _selectedSearchIndex = (_selectedSearchIndex - 1 + n) % n;
       });
       _scrollSelectedSearchItemIntoView();
+      return true;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.enter &&
+        _selectedSearchIndex >= 0 &&
+        _selectedSearchIndex < _searchResults.length) {
+      final r = _searchResults[_selectedSearchIndex];
+      _cards[r.cardIndex].itemInteractor.onItemTap(r.item);
       return true;
     }
     return false;
@@ -339,6 +477,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
 
   void _showMain() async {
     setState(() => _isOnSettingsPage = false);
+    await windowManager.setSize(const Size(800, 400));
     await windowManager.show();
     await windowManager.focus();
     _focusSearchField();
@@ -352,6 +491,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
 
   Widget _buildCardGrid(BuildContext context) {
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: List.generate(_cards.length, (i) {
         final card = _cards[i];
         return Expanded(
@@ -370,11 +510,23 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
     );
   }
 
+  void _onCardListScroll() {
+    if (_displayedItemCount >= _cardItems.length) return;
+    if (_cardListScrollController.position.pixels <
+        _cardListScrollController.position.maxScrollExtent - 300) {
+      return;
+    }
+    setState(() {
+      _displayedItemCount = (_displayedItemCount + 30).clamp(0, _cardItems.length);
+    });
+  }
+
   void _openCard(int index) async {
     setState(() {
       _selectedCardIndex = index;
       _isLoading = true;
       _cardItems = [];
+      _displayedItemCount = 0;
     });
     _focusSearchField();
     final items = await _cards[index].scan();
@@ -382,6 +534,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
     setState(() {
       _cardItems = items;
       _isLoading = false;
+      _displayedItemCount = 30 > items.length ? items.length : 30;
     });
     _focusSearchField();
   }
@@ -412,7 +565,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
           Container(
             height: 48,
             decoration: BoxDecoration(
-              gradient: LinearGradient(colors: card.gradient),
+              gradient: LinearGradient(colors: gradientColorsWithAlpha(card.gradient)),
             ),
             child: Row(
               children: [
@@ -436,7 +589,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
             child: Container(
               decoration: BoxDecoration(
                 gradient: LinearGradient(
-                  colors: card.gradient,
+                  colors: gradientColorsWithAlpha(card.gradient),
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
                 ),
@@ -444,8 +597,11 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
               child: _isLoading
                   ? const Center(child: CircularProgressIndicator(color: Colors.white54))
                   : ListView.separated(
+                      controller: _cardListScrollController,
                       padding: const EdgeInsets.symmetric(vertical: 4),
-                      itemCount: _cardItems.length,
+                      itemCount: _displayedItemCount < _cardItems.length
+                          ? _displayedItemCount + 1
+                          : _displayedItemCount,
                       separatorBuilder: (_, i) => const Divider(
                         height: 1,
                         indent: 16,
@@ -453,6 +609,21 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                         color: Colors.white12,
                       ),
                       itemBuilder: (context, i) {
+                        if (i >= _cardItems.length) {
+                          return const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 16),
+                            child: Center(
+                              child: SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white54,
+                                ),
+                              ),
+                            ),
+                          );
+                        }
                         final item = _cardItems[i];
                         return ListTile(
                           title: Text(
@@ -462,8 +633,10 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                           subtitle: item.subtitle != null
                               ? Text(item.subtitle!, style: const TextStyle(color: Colors.white54))
                               : null,
-                          leading: _AppIcon(iconPath: item.iconPath, fallback: item.icon),
-                          trailing: _userEntryTrailing(context, card, item),
+                          leading: _AppIcon(iconPath: item.iconPath, iconBytes: item.iconBytes, fallback: item.icon),
+                          trailing: _selectedCardIndex == 0
+                              ? _userEntryTrailing(context, card, item)
+                              : _userEntryDeleteOnly(context, card, item),
                           onTap: () => card.itemInteractor.onItemTap(item),
                         );
                       },
@@ -476,7 +649,6 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
   }
 
   Widget _buildSearchResults() {
-    final query = _searchQuery.trim();
     if (_searchResults.isEmpty) {
       return const Center(
         child: Text('未找到匹配的应用', style: TextStyle(color: Colors.white54)),
@@ -484,7 +656,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
     }
     _ensureSearchResultKeys();
     return ListView.separated(
-      padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 6),
+      padding: const EdgeInsets.symmetric(vertical: 4),
       itemCount: _searchResults.length,
       separatorBuilder: (_, i) => const Divider(
         height: 1,
@@ -493,22 +665,42 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
         color: Colors.white12,
       ),
       itemBuilder: (context, i) {
-        final item = _searchResults[i];
+        final result = _searchResults[i];
+        final item = result.item;
+        final card = _cards[result.cardIndex];
         final isSelected = i == _selectedSearchIndex;
         return ListTile(
           key: _searchResultKeys[i],
           selected: isSelected,
           selectedTileColor: Colors.lightBlue.withAlpha(46),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-            side: isSelected
-                ? const BorderSide(color: Color(0xFF7EB8FF), width: 2)
-                : BorderSide.none,
+          title: Text(
+            item.title,
+            style: const TextStyle(color: Colors.white),
           ),
-          title: _HighlightedText(text: item.title, query: query),
-          leading: _AppIcon(iconPath: item.iconPath, fallback: item.icon),
-          trailing: _userEntryTrailing(context, _cards[0], item),
-          onTap: () => _cards[0].itemInteractor.onItemTap(item),
+          subtitle: item.subtitle != null
+              ? Text(item.subtitle!, style: const TextStyle(color: Colors.white54))
+              : null,
+          leading: _AppIcon(iconPath: item.iconPath, iconBytes: item.iconBytes, fallback: item.icon),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: gradientColorsWithAlpha(card.gradient).first.withAlpha(130),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  card.name,
+                  style: const TextStyle(color: Colors.white, fontSize: 11),
+                ),
+              ),
+              if (item.isUserEntry) const SizedBox(width: 4),
+              if (item.isUserEntry)
+                _userEntryTrailing(context, card, item)!,
+            ],
+          ),
+          onTap: () => card.itemInteractor.onItemTap(item),
         );
       },
     );
@@ -517,10 +709,12 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleHardwareKey);
+    _cardListScrollController.dispose();
     _searchFocusNode.dispose();
     _searchController.dispose();
     trayManager.removeListener(this);
     windowManager.removeListener(this);
+    _cloudUploadTimer?.cancel();
     _shortcutService.dispose();
     super.dispose();
   }
@@ -531,6 +725,8 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       return SettingsPage(
         appSettings: widget.appSettings,
         onHotKeyChanged: _reRegisterHotKey,
+        userCardStore: _userCardStore,
+        onCloudSyncApplied: _onUserCardDataChanged,
       );
     }
 
@@ -547,12 +743,27 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                 child: Container(color: Colors.transparent.withAlpha(200)),
               ),
             ),
+            // 全窗拖拽层（translucent 不阻断子组件事件）
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onPanStart: (_) => windowManager.startDragging(),
+                child: const SizedBox.expand(),
+              ),
+            ),
             // 内容
             Padding(
               padding: const EdgeInsets.all(20),
               child: Column(
                 children: [
-                  const SizedBox(height: 20),
+                  GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onPanStart: (_) => windowManager.startDragging(),
+                    child: const MouseRegion(
+                      cursor: SystemMouseCursors.move,
+                      child: SizedBox(height: 30),
+                    ),
+                  ),
                   TextField(
                     controller: _searchController,
                     focusNode: _searchFocusNode,
@@ -621,7 +832,7 @@ class _CardWidgetState extends State<_CardWidget> {
     return Container(
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: widget.gradient,
+          colors: gradientColorsWithAlpha(widget.gradient),
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
@@ -630,28 +841,32 @@ class _CardWidgetState extends State<_CardWidget> {
       child: Column(
         children: [
           Expanded(
-            child: GestureDetector(
-              onTapDown: _onTapDown,
-              onTapUp: _onTapUp,
-              onTapCancel: _onTapCancel,
-              onTap: widget.onTap,
-              child: AnimatedScale(
-                scale: _scale,
-                duration: const Duration(milliseconds: 100),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(widget.icon, color: Colors.white, size: 36),
-                    const SizedBox(height: 8),
-                    Text(
-                      widget.name,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500,
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapDown: _onTapDown,
+                onTapUp: _onTapUp,
+                onTapCancel: _onTapCancel,
+                onTap: widget.onTap,
+                child: AnimatedScale(
+                  scale: _scale,
+                  duration: const Duration(milliseconds: 100),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(widget.icon, color: Colors.white, size: 36),
+                      const SizedBox(height: 8),
+                      Text(
+                        widget.name,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -672,9 +887,10 @@ class _CardWidgetState extends State<_CardWidget> {
 
 class _AppIcon extends StatefulWidget {
   final String? iconPath;
+  final Uint8List? iconBytes;
   final IconData fallback;
 
-  const _AppIcon({this.iconPath, required this.fallback});
+  const _AppIcon({this.iconPath, this.iconBytes, required this.fallback});
 
   @override
   State<_AppIcon> createState() => _AppIconState();
@@ -692,10 +908,15 @@ class _AppIconState extends State<_AppIcon> {
   @override
   void didUpdateWidget(_AppIcon old) {
     super.didUpdateWidget(old);
-    if (old.iconPath != widget.iconPath) _load();
+    if (old.iconPath != widget.iconPath || old.iconBytes != widget.iconBytes) _load();
   }
 
   Future<void> _load() async {
+    if (widget.iconBytes != null) {
+      if (!mounted) return;
+      setState(() => _bytes = widget.iconBytes);
+      return;
+    }
     final path = widget.iconPath;
     if (path == null) return;
     final bytes = await extractIconBytes(path);
@@ -720,39 +941,4 @@ class _AppIconState extends State<_AppIcon> {
   }
 }
 
-class _HighlightedText extends StatelessWidget {
-  final String text;
-  final String query;
 
-  const _HighlightedText({required this.text, required this.query});
-
-  @override
-  Widget build(BuildContext context) {
-    if (query.isEmpty) {
-      return Text(text, style: const TextStyle(color: Colors.white));
-    }
-
-    final lower = text.toLowerCase();
-    final q = query.toLowerCase();
-    final spans = <TextSpan>[];
-    int start = 0;
-
-    while (true) {
-      final idx = lower.indexOf(q, start);
-      if (idx == -1) {
-        spans.add(TextSpan(text: text.substring(start)));
-        break;
-      }
-      if (idx > start) {
-        spans.add(TextSpan(text: text.substring(start, idx)));
-      }
-      spans.add(TextSpan(
-        text: text.substring(idx, idx + q.length),
-        style: const TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold),
-      ));
-      start = idx + q.length;
-    }
-
-    return RichText(text: TextSpan(style: const TextStyle(color: Colors.white), children: spans));
-  }
-}

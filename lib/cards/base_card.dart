@@ -1,4 +1,14 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+
+/// 卡片渐变叠在毛玻璃上时的默认不透明度（0–255，越小越透明）。
+const int kGradientSurfaceAlpha = 200;
+
+/// 将卡片渐变色转为带透明度的颜色列表。
+List<Color> gradientColorsWithAlpha(List<Color> colors, [int alpha = kGradientSurfaceAlpha]) {
+  return [for (final c in colors) c.withAlpha(alpha)];
+}
 
 class CardItem {
   final String title;
@@ -6,6 +16,7 @@ class CardItem {
   final IconData icon;
   final dynamic data;
   final String? iconPath;
+  final Uint8List? iconBytes;
   /// 用户通过表单新建的条目（与内置条目区分处理逻辑）
   final bool isUserEntry;
   /// 标签（用户条目用于编辑表单；内置条目可为空）
@@ -17,6 +28,7 @@ class CardItem {
     this.icon = Icons.description,
     this.data,
     this.iconPath,
+    this.iconBytes,
     this.isUserEntry = false,
     this.tags = const [],
   });
@@ -43,4 +55,7 @@ abstract class BaseCard {
 
   Future<List<CardItem>> scan();
   Future<List<CardItem>> search(String keywords) async => [];
+
+  /// 全局搜索用：参与 Hybrid 排序的条目池；默认与 [scan] 一致。
+  Future<List<CardItem>> loadSearchItemPool() async => scan();
 }

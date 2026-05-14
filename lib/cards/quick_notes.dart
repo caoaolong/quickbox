@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'base_card.dart';
@@ -10,12 +12,30 @@ class _QuickNotesItemInteractor implements CardItemInteractor {
 
   @override
   void onItemTap(CardItem item) {
-    if (item.isUserEntry) {
-      final text = item.data as String?;
-      if (text != null && text.isNotEmpty) {
-        Clipboard.setData(ClipboardData(text: text));
+    if (!item.isUserEntry) return;
+    try {
+      final raw = item.data;
+      final m = raw is String
+          ? Map<String, dynamic>.from(jsonDecode(raw) as Map)
+          : Map<String, dynamic>.from(raw as Map);
+      final kind = m['kind']?.toString() ?? NoteKind.note;
+      final String text;
+      switch (kind) {
+        case NoteKind.account:
+          text =
+              '账户名：${m['accountName'] ?? ''}\n用户名：${m['userName'] ?? ''}\n密码：${m['password'] ?? ''}';
+          break;
+        case NoteKind.token:
+          text = '账户名：${m['accountName'] ?? ''}\nToken：${m['tokenValue'] ?? ''}';
+          break;
+        default:
+          final t = m['title']?.toString().trim() ?? '';
+          final body = m['noteContent']?.toString() ?? '';
+          text = t.isNotEmpty ? '$t\n\n$body' : body;
       }
-      return;
+      Clipboard.setData(ClipboardData(text: text));
+    } catch (_) {
+      Clipboard.setData(ClipboardData(text: item.data?.toString() ?? ''));
     }
   }
 
@@ -42,8 +62,15 @@ class _QuickNotesItemInteractor implements CardItemInteractor {
   @override
   void onItemDelete(BuildContext context, CardItem item) async {
     if (!item.isUserEntry) return;
-    final content = item.data as String?;
-    if (content == null) return;
+    String? id;
+    try {
+      final raw = item.data;
+      final m = raw is String
+          ? Map<String, dynamic>.from(jsonDecode(raw) as Map)
+          : Map<String, dynamic>.from(raw as Map);
+      id = m['id']?.toString();
+    } catch (_) {}
+    if (id == null || id.isEmpty) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -63,7 +90,7 @@ class _QuickNotesItemInteractor implements CardItemInteractor {
       ),
     );
     if (ok == true && context.mounted) {
-      await card.userStore.removeNote(content);
+      await card.userStore.removeNoteById(id);
       card.onUserDataChanged?.call();
     }
   }
@@ -93,17 +120,6 @@ class QuickNotesCard extends BaseCard {
 
   @override
   Future<List<CardItem>> scan() async {
-    final user = await userStore.loadNoteCardItems();
-    return [
-      ...user,
-      const CardItem(
-        title: '会议记录',
-        subtitle: '2024-01-15',
-        icon: Icons.meeting_room,
-      ),
-      const CardItem(title: '待办事项', subtitle: '5 项未完成', icon: Icons.checklist),
-      const CardItem(title: '学习笔记', subtitle: 'Flutter 相关', icon: Icons.school),
-      const CardItem(title: '代码片段', subtitle: '常用代码段', icon: Icons.terminal),
-    ];
+    return userStore.loadNoteCardItems();
   }
 }
