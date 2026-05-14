@@ -119,27 +119,9 @@ class HybridSearchEngine {
     return out;
   }
 
+  /// 始终对全部文档打分。若用语前缀 Trie 缩小候选集，会漏掉仅命中子串/副标题/URL 的条目（跨卡片全局搜索会只剩少数类型）。
   Set<int> _collectCandidates(String qn, String qCompact) {
-    final union = <int>{};
-    var hitAny = false;
-
-    void tryTrie(TrieIndex trie, String prefix) {
-      if (prefix.isEmpty) return;
-      final s = trie.docsWithPrefix(prefix);
-      if (s != null && s.isNotEmpty) {
-        union.addAll(s);
-        hitAny = true;
-      }
-    }
-
-    tryTrie(_trieOrig, qn);
-    tryTrie(_triePinyin, qCompact);
-    tryTrie(_trieInitials, qCompact);
-
-    if (!hitAny || union.isEmpty) {
-      return Set<int>.from(List<int>.generate(count, (i) => i));
-    }
-    return union;
+    return Set<int>.from(List<int>.generate(count, (i) => i));
   }
 }
 

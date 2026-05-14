@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'base_card.dart';
 import '../pages/card_item_form_page.dart';
+import '../services/hybrid_search/hybrid_search_engine.dart';
 import '../services/user_card_store.dart';
 
 class _QuickNotesItemInteractor implements CardItemInteractor {
@@ -121,5 +122,11 @@ class QuickNotesCard extends BaseCard {
   @override
   Future<List<CardItem>> scan() async {
     return userStore.loadNoteCardItems();
+  }
+
+  @override
+  Future<List<CardItem>> search(String keywords) async {
+    final all = await loadSearchItemPool();
+    return HybridSearch.sortCardItems(keywords, all);
   }
 }

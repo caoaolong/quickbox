@@ -127,6 +127,9 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
   List<_SearchResult> _searchResults = [];
   int _selectedSearchIndex = -1;
   final List<GlobalKey> _searchResultKeys = [];
+  List<CardItem> _localSearchResults = [];
+  int _localSearchSelectedIndex = -1;
+  final List<GlobalKey> _localSearchResultKeys = [];
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode(debugLabel: 'search');
   Timer? _cloudUploadTimer;
@@ -242,8 +245,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
     (_cards[0] as QuickAppsCard).invalidateSearchPoolCache();
     if (_selectedCardIndex >= 0) {
       _openCard(_selectedCardIndex);
-    }
-    if (_searchQuery.trim().isNotEmpty) {
+    } else if (_searchQuery.trim().isNotEmpty) {
       _performSearch(_searchController.text);
     }
   }
@@ -318,10 +320,26 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       setState(() {
         _searchResults = [];
         _selectedSearchIndex = -1;
+        _localSearchResults = [];
+        _localSearchSelectedIndex = -1;
       });
       return;
     }
-    _performSearch(query);
+    if (_selectedCardIndex < 0) {
+      _performSearch(query);
+    } else {
+      _performLocalSearch(query);
+    }
+  }
+
+  Future<void> _performLocalSearch(String query) async {
+    if (_selectedCardIndex < 0) return;
+    final items = await _cards[_selectedCardIndex].search(query);
+    if (!mounted || _searchController.text != query) return;
+    setState(() {
+      _localSearchResults = items;
+      _localSearchSelectedIndex = items.isEmpty ? -1 : 0;
+    });
   }
 
   Future<void> _performSearch(String query) async {
@@ -363,29 +381,58 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       _handleEsc();
       return true;
     }
-    if (_searchQuery.trim().isEmpty || _searchResults.isEmpty) return false;
+    if (_searchQuery.trim().isEmpty) return false;
 
+    if (_selectedCardIndex < 0) {
+      if (_searchResults.isEmpty) return false;
+      if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+        setState(() {
+          final n = _searchResults.length;
+          _selectedSearchIndex = (_selectedSearchIndex + 1) % n;
+        });
+        _scrollSelectedSearchItemIntoView();
+        return true;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+        setState(() {
+          final n = _searchResults.length;
+          _selectedSearchIndex = (_selectedSearchIndex - 1 + n) % n;
+        });
+        _scrollSelectedSearchItemIntoView();
+        return true;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.enter &&
+          _selectedSearchIndex >= 0 &&
+          _selectedSearchIndex < _searchResults.length) {
+        final r = _searchResults[_selectedSearchIndex];
+        _cards[r.cardIndex].itemInteractor.onItemTap(r.item);
+        return true;
+      }
+      return false;
+    }
+
+    if (_localSearchResults.isEmpty) return false;
     if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
       setState(() {
-        final n = _searchResults.length;
-        _selectedSearchIndex = (_selectedSearchIndex + 1) % n;
+        final n = _localSearchResults.length;
+        _localSearchSelectedIndex = (_localSearchSelectedIndex + 1) % n;
       });
-      _scrollSelectedSearchItemIntoView();
+      _scrollSelectedLocalSearchItemIntoView();
       return true;
     }
     if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
       setState(() {
-        final n = _searchResults.length;
-        _selectedSearchIndex = (_selectedSearchIndex - 1 + n) % n;
+        final n = _localSearchResults.length;
+        _localSearchSelectedIndex = (_localSearchSelectedIndex - 1 + n) % n;
       });
-      _scrollSelectedSearchItemIntoView();
+      _scrollSelectedLocalSearchItemIntoView();
       return true;
     }
     if (event.logicalKey == LogicalKeyboardKey.enter &&
-        _selectedSearchIndex >= 0 &&
-        _selectedSearchIndex < _searchResults.length) {
-      final r = _searchResults[_selectedSearchIndex];
-      _cards[r.cardIndex].itemInteractor.onItemTap(r.item);
+        _localSearchSelectedIndex >= 0 &&
+        _localSearchSelectedIndex < _localSearchResults.length) {
+      final r = _localSearchResults[_localSearchSelectedIndex];
+      _cards[_selectedCardIndex].itemInteractor.onItemTap(r);
       return true;
     }
     return false;
@@ -406,6 +453,32 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       final i = _selectedSearchIndex;
       if (i < 0 || i >= _searchResultKeys.length) return;
       final ctx = _searchResultKeys[i].currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          alignment: 0.35,
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    });
+  }
+
+  void _ensureLocalSearchResultKeys() {
+    final n = _localSearchResults.length;
+    while (_localSearchResultKeys.length < n) {
+      _localSearchResultKeys.add(GlobalKey());
+    }
+    if (_localSearchResultKeys.length > n) {
+      _localSearchResultKeys.removeRange(n, _localSearchResultKeys.length);
+    }
+  }
+
+  void _scrollSelectedLocalSearchItemIntoView() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final i = _localSearchSelectedIndex;
+      if (i < 0 || i >= _localSearchResultKeys.length) return;
+      final ctx = _localSearchResultKeys[i].currentContext;
       if (ctx != null) {
         Scrollable.ensureVisible(
           ctx,
@@ -536,6 +609,9 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       _isLoading = false;
       _displayedItemCount = 30 > items.length ? items.length : 30;
     });
+    if (_searchQuery.trim().isNotEmpty) {
+      await _performLocalSearch(_searchController.text);
+    }
     _focusSearchField();
   }
 
@@ -572,7 +648,13 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                 const SizedBox(width: 8),
                 IconButton(
                   icon: const Icon(Icons.arrow_back, color: Colors.white),
-                  onPressed: () => setState(() => _selectedCardIndex = -1),
+                  onPressed: () {
+                    final hadQuery = _searchQuery.trim().isNotEmpty;
+                    setState(() => _selectedCardIndex = -1);
+                    if (hadQuery) {
+                      _performSearch(_searchController.text);
+                    }
+                  },
                 ),
                 Text(
                   card.name,
@@ -651,7 +733,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
   Widget _buildSearchResults() {
     if (_searchResults.isEmpty) {
       return const Center(
-        child: Text('未找到匹配的应用', style: TextStyle(color: Colors.white54)),
+        child: Text('未找到匹配项', style: TextStyle(color: Colors.white54)),
       );
     }
     _ensureSearchResultKeys();
@@ -700,6 +782,47 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                 _userEntryTrailing(context, card, item)!,
             ],
           ),
+          onTap: () => card.itemInteractor.onItemTap(item),
+        );
+      },
+    );
+  }
+
+  Widget _buildLocalSearchResults() {
+    if (_localSearchResults.isEmpty) {
+      return const Center(
+        child: Text('未找到匹配项', style: TextStyle(color: Colors.white54)),
+      );
+    }
+    _ensureLocalSearchResultKeys();
+    final card = _cards[_selectedCardIndex];
+    return ListView.separated(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      itemCount: _localSearchResults.length,
+      separatorBuilder: (_, i) => const Divider(
+        height: 1,
+        indent: 16,
+        endIndent: 16,
+        color: Colors.white12,
+      ),
+      itemBuilder: (context, i) {
+        final item = _localSearchResults[i];
+        final isSelected = i == _localSearchSelectedIndex;
+        return ListTile(
+          key: _localSearchResultKeys[i],
+          selected: isSelected,
+          selectedTileColor: Colors.lightBlue.withAlpha(46),
+          title: Text(
+            item.title,
+            style: const TextStyle(color: Colors.white),
+          ),
+          subtitle: item.subtitle != null
+              ? Text(item.subtitle!, style: const TextStyle(color: Colors.white54))
+              : null,
+          leading: _AppIcon(iconPath: item.iconPath, iconBytes: item.iconBytes, fallback: item.icon),
+          trailing: _selectedCardIndex == 0
+              ? _userEntryTrailing(context, card, item)
+              : _userEntryDeleteOnly(context, card, item),
           onTap: () => card.itemInteractor.onItemTap(item),
         );
       },
@@ -769,7 +892,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                     focusNode: _searchFocusNode,
                     style: const TextStyle(color: Colors.white, fontSize: 16),
                     decoration: InputDecoration(
-                      hintText: '搜索应用...',
+                      hintText: '搜索应用、网页、指令、笔记…',
                       hintStyle: const TextStyle(color: Colors.white60),
                       prefixIcon: const Icon(
                         Icons.search,
@@ -786,7 +909,9 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                   const SizedBox(height: 24),
                   Expanded(
                     child: _searchQuery.trim().isNotEmpty
-                        ? _buildSearchResults()
+                        ? (_selectedCardIndex < 0
+                            ? _buildSearchResults()
+                            : _buildLocalSearchResults())
                         : _selectedCardIndex == -1
                             ? _buildCardGrid(context)
                             : _buildCardList(),

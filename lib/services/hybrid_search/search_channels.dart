@@ -29,6 +29,16 @@ class SearchChannels {
         buf.write(tt);
       }
     }
+    final dataStr = item.data is String ? (item.data as String).trim() : '';
+    if (dataStr.isNotEmpty) {
+      buf.write(' ');
+      buf.write(dataStr);
+    }
+    final ip = item.iconPath?.trim();
+    if (ip != null && ip.isNotEmpty && ip != dataStr) {
+      buf.write(' ');
+      buf.write(ip);
+    }
     final combined = buf.toString().trim();
     if (combined.isEmpty) {
       return const SearchChannels(original: '', fullPinyin: '', initials: '');

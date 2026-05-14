@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -120,19 +119,7 @@ class QuickAppsCard extends BaseCard {
 
   Future<String> _computeSearchPoolFingerprint() async {
     final parts = <String>[];
-    if (indexDirectory != null) {
-      final f = File('$indexDirectory\\apps.json');
-      if (await f.exists()) {
-        final st = await f.stat();
-        parts.add(
-          'apps:${st.modified.millisecondsSinceEpoch}:${st.size}',
-        );
-      } else {
-        parts.add('apps:missing');
-      }
-    } else {
-      parts.add('apps:noidx');
-    }
+    parts.add(Platform.environment['PATH'] ?? '');
     if (userStore != null) {
       final uf = File(userStore!.appSettings.userEntriesPath);
       if (await uf.exists()) {
@@ -146,50 +133,35 @@ class QuickAppsCard extends BaseCard {
     } else {
       parts.add('user:none');
     }
+    final programData = Platform.environment['PROGRAMDATA'];
+    final appData = Platform.environment['APPDATA'];
+    for (final root in [
+      if (programData != null)
+        '$programData\\Microsoft\\Windows\\Start Menu\\Programs',
+      if (appData != null)
+        '$appData\\Microsoft\\Windows\\Start Menu\\Programs',
+    ]) {
+      final d = Directory(root);
+      if (await d.exists()) {
+        try {
+          final st = await d.stat();
+          parts.add('sm:$root:${st.modified.millisecondsSinceEpoch}');
+        } catch (_) {
+          parts.add('sm:$root:err');
+        }
+      }
+    }
     return parts.join('|');
   }
 
-  /// 参与全局 / 本地 Hybrid 搜索的应用池（JSON + 用户应用，按路径去重）。
+  /// 与 [scan] 同源：保证列表里能看到的快捷应用均可被搜索（不仅限于 apps.json）。
   @override
   Future<List<CardItem>> loadSearchItemPool() async {
     final fp = await _computeSearchPoolFingerprint();
     if (_searchPoolFp == fp && _searchPoolItems != null) {
       return _searchPoolItems!;
     }
-    final results = <CardItem>[];
-    final seenPaths = <String>{};
-
-    if (indexDirectory != null) {
-      final file = File('$indexDirectory\\apps.json');
-      if (await file.exists()) {
-        try {
-          final data = jsonDecode(await file.readAsString()) as List;
-          for (final item in data) {
-            final title = item['title'] as String? ?? '';
-            final path = item['path'] as String?;
-            if (path == null || path.isEmpty) continue;
-            if (seenPaths.add(path)) {
-              results.add(CardItem(
-                title: title,
-                icon: Icons.launch,
-                data: path,
-                iconPath: path,
-              ));
-            }
-          }
-        } catch (_) {}
-      }
-    }
-
-    final userItems =
-        userStore != null ? await userStore!.loadAppCardItems() : <CardItem>[];
-    for (final u in userItems) {
-      final path = u.data as String?;
-      if (path != null && seenPaths.add(path)) {
-        results.add(u);
-      }
-    }
-
+    final results = await scan();
     _searchPoolFp = fp;
     _searchPoolItems = results;
     return results;
