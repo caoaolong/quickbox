@@ -33,6 +33,37 @@ STAGING=$(mktemp -d)
 cleanup() { rm -rf "$STAGING" /tmp/gen_bg.swift /tmp/gen_bg; }
 trap cleanup EXIT
 
+# 确保临时 DMG 完全卸载（CI 上 Finder/Spotlight 慢释放会导致 hdiutil convert 报 EAGAIN）
+detach_tmp_dmg() {
+    local mp="$1"
+    [ -z "$mp" ] && return 0
+    if ! hdiutil detach "$mp" -quiet 2>/dev/null; then
+        sleep 1
+        hdiutil detach "$mp" -force -quiet 2>/dev/null || true
+    fi
+    # 等待镜像不再处于 busy 状态（最多约 15s）
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if ! hdiutil info 2>/dev/null | grep -Fq "$TMP_DMG"; then
+            break
+        fi
+        sleep 1.5
+    done
+}
+
+hdiutil_convert_with_retry() {
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        rm -f "$DMG_NAME"
+        if hdiutil convert "$TMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_NAME"; then
+            return 0
+        fi
+        echo "    (convert 第 $attempt 次失败，5 次内重试，等待释放 DMG…)"
+        sleep 3
+    done
+    return 1
+}
+
 echo "==> Copying app bundle..."
 cp -R "$APP_SRC" "$STAGING/${APP_NAME}.app"
 
@@ -131,7 +162,8 @@ hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" \
 
 # ---- 4. Mount and configure with Finder settings ----
 echo "==> Configuring DMG appearance..."
-MOUNT_POINT=$(hdiutil attach -readwrite -noverify -noautoopen "$TMP_DMG" 2>/dev/null | \
+# -nobrowse：避免 Finder 挂住卷，降低 GitHub Actions 上 convert 出现 EAGAIN 的概率
+MOUNT_POINT=$(hdiutil attach -readwrite -noverify -noautoopen -nobrowse "$TMP_DMG" 2>/dev/null | \
     grep "/Volumes/$APP_NAME" | awk '{$1=$2=$3=""; sub(/^[[:space:]]+/, ""); print}')
 
 if [ -n "$MOUNT_POINT" ]; then
@@ -161,13 +193,12 @@ if [ -n "$MOUNT_POINT" ]; then
 EOF
 
     sleep 2
-    hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
+    detach_tmp_dmg "$MOUNT_POINT"
 fi
 
 # ---- 5. Convert to compressed DMG ----
 echo "==> Compressing final DMG..."
-rm -f "$DMG_NAME"
-hdiutil convert "$TMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_NAME"
+hdiutil_convert_with_retry
 rm -f "$TMP_DMG"
 
 echo ""
