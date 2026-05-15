@@ -8,5 +8,17 @@
 	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
+	<!-- 与 Release 一致：便于调试时扫描应用与 PATH -->
+	<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+	<array>
+		<string>/Applications/</string>
+		<string>/System/Applications/</string>
+		<string>/usr/bin/</string>
+		<string>/bin/</string>
+		<string>/usr/sbin/</string>
+		<string>/sbin/</string>
+		<string>/opt/homebrew/bin/</string>
+		<string>/usr/local/bin/</string>
+	</array>
 </dict>
 </plist>

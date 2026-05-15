@@ -18,7 +18,8 @@ class IndexService {
       'path': item.iconPath,
     }).toList();
 
-    final file = File('${appSettings.indexDirectory}\\apps.json');
+    final sep = Platform.pathSeparator;
+    final file = File('${appSettings.indexDirectory}${sep}apps.json');
     await file.writeAsString(jsonEncode(data));
     return data.length;
   }

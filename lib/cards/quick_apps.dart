@@ -13,10 +13,16 @@ class _QuickAppsItemInteractor implements CardItemInteractor {
   @override
   void onItemTap(CardItem item) {
     final path = item.data as String;
-    if (path.toLowerCase().endsWith('.lnk')) {
-      Process.run('cmd', ['/c', 'start', '', path], runInShell: true);
+    if (Platform.isWindows) {
+      if (path.toLowerCase().endsWith('.lnk')) {
+        Process.run('cmd', ['/c', 'start', '', path], runInShell: true);
+      } else {
+        Process.run(path, [], runInShell: true);
+      }
+    } else if (Platform.isMacOS && path.toLowerCase().endsWith('.app')) {
+      Process.run('open', [path]);
     } else {
-      Process.run(path, [], runInShell: true);
+      Process.run(path, [], runInShell: Platform.isWindows);
     }
   }
 
@@ -110,7 +116,7 @@ class QuickAppsCard extends BaseCard {
     final items = <CardItem>[...userItems];
     final seen = <String>{for (final u in userItems) u.data as String};
 
-    await _scanStartMenu(items, seen);
+    await _scanDesktopLaunchers(items, seen);
     await _scanPathExecutables(items, seen);
 
     items.sort((a, b) => a.title.compareTo(b.title));
@@ -151,6 +157,19 @@ class QuickAppsCard extends BaseCard {
         }
       }
     }
+    if (Platform.isMacOS) {
+      for (final root in _macApplicationRoots()) {
+        final d = Directory(root);
+        if (await d.exists()) {
+          try {
+            final st = await d.stat();
+            parts.add('apps:$root:${st.modified.millisecondsSinceEpoch}');
+          } catch (_) {
+            parts.add('apps:$root:err');
+          }
+        }
+      }
+    }
     return parts.join('|');
   }
 
@@ -173,7 +192,12 @@ class QuickAppsCard extends BaseCard {
     return HybridSearch.sortCardItems(keywords, pool);
   }
 
-  Future<void> _scanStartMenu(List<CardItem> items, Set<String> seen) async {
+  /// Windows：开始菜单 .lnk；macOS：/Applications 等与 .app 包。
+  Future<void> _scanDesktopLaunchers(List<CardItem> items, Set<String> seen) async {
+    if (Platform.isMacOS) {
+      await _scanMacApplications(items, seen);
+      return;
+    }
     final programData = Platform.environment['PROGRAMDATA'];
     final appData = Platform.environment['APPDATA'];
 
@@ -188,6 +212,60 @@ class QuickAppsCard extends BaseCard {
       if (!await dir.exists()) continue;
       await _walkDir(dir, items, seen);
     }
+  }
+
+  List<String> _macApplicationRoots() {
+    final home = Platform.environment['HOME'];
+    return [
+      '/Applications',
+      '/System/Applications',
+      if (home != null && home.isNotEmpty) '$home/Applications',
+    ];
+  }
+
+  Future<void> _scanMacApplications(List<CardItem> items, Set<String> seen) async {
+    for (final root in _macApplicationRoots()) {
+      final dir = Directory(root);
+      if (!await dir.exists()) continue;
+      await _walkMacApplicationsDir(dir, items, seen);
+    }
+  }
+
+  Future<void> _walkMacApplicationsDir(
+    Directory dir,
+    List<CardItem> items,
+    Set<String> seen,
+  ) async {
+    try {
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! Directory) continue;
+        final p = entity.path;
+        if (p.endsWith('.app')) {
+          if (!seen.add(p)) continue;
+          final base = _fileBasename(p);
+          final title = _cleanName(
+            base.length > 4 ? base.substring(0, base.length - 4) : base,
+          );
+          if (title.isEmpty) continue;
+          items.add(
+            CardItem(
+              title: title,
+              icon: Icons.launch,
+              data: p,
+              iconPath: p,
+            ),
+          );
+        } else {
+          await _walkMacApplicationsDir(entity, items, seen);
+        }
+      }
+    } catch (_) {}
+  }
+
+  String _fileBasename(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final i = normalized.lastIndexOf('/');
+    return i == -1 ? path : normalized.substring(i + 1);
   }
 
   Future<void> _walkDir(
@@ -219,37 +297,66 @@ class QuickAppsCard extends BaseCard {
     Set<String> seen,
   ) async {
     final pathStr = Platform.environment['PATH'] ?? '';
-    for (final dirPath in pathStr.split(';')) {
+    final sep = Platform.isWindows ? ';' : ':';
+    for (final dirPath in pathStr.split(sep)) {
       final trimmed = dirPath.trim();
       if (trimmed.isEmpty) continue;
       final dir = Directory(trimmed);
       if (!await dir.exists()) continue;
       try {
-        await for (final entity in dir.list(followLinks: false)) {
-          if (entity is File) {
+        if (Platform.isWindows) {
+          await for (final entity in dir.list(followLinks: false)) {
+            if (entity is File) {
+              final p = entity.path;
+              final name = p.split(Platform.pathSeparator).last.toLowerCase();
+              if (!name.endsWith('.exe') &&
+                  !name.endsWith('.cmd') &&
+                  !name.endsWith('.bat')) {
+                continue;
+              }
+              final title = _cleanName(name.substring(0, name.lastIndexOf('.')));
+              if (title.isNotEmpty && seen.add(title)) {
+                items.add(
+                  CardItem(
+                    title: title,
+                    icon: Icons.dashboard,
+                    data: p,
+                    iconPath: p,
+                  ),
+                );
+              }
+            }
+          }
+        } else {
+          await for (final entity in dir.list(followLinks: false)) {
+            if (entity is! File) continue;
             final p = entity.path;
-            final name = p.split(Platform.pathSeparator).last.toLowerCase();
-            if (!name.endsWith('.exe') &&
-                !name.endsWith('.cmd') &&
-                !name.endsWith('.bat')) {
+            final name = _fileBasename(p);
+            if (name.startsWith('.')) continue;
+            try {
+              final st = await entity.stat();
+              if (!_hasPosixExecuteBit(st.mode)) continue;
+            } catch (_) {
               continue;
             }
-            final title = _cleanName(name.substring(0, name.lastIndexOf('.')));
-            if (title.isNotEmpty && seen.add(title)) {
-              items.add(
-                CardItem(
-                  title: title,
-                  icon: Icons.dashboard,
-                  data: p,
-                  iconPath: p,
-                ),
-              );
-            }
+            final title = _cleanName(name);
+            if (title.isEmpty || !seen.add(p)) continue;
+            items.add(
+              CardItem(
+                title: title,
+                icon: Icons.dashboard,
+                data: p,
+                iconPath: p,
+              ),
+            );
           }
         }
       } catch (_) {}
     }
   }
+
+  /// POSIX st_mode 中任一可执行位（owner/group/other）。
+  bool _hasPosixExecuteBit(int mode) => (mode & 73) != 0;
 
   String _cleanName(String name) {
     name = name.trim();

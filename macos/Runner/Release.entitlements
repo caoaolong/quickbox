@@ -4,5 +4,17 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!-- 扫描已安装应用与 PATH 目录（read-only）；上架 Mac App Store 时可能被审核追问 -->
+	<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+	<array>
+		<string>/Applications/</string>
+		<string>/System/Applications/</string>
+		<string>/usr/bin/</string>
+		<string>/bin/</string>
+		<string>/usr/sbin/</string>
+		<string>/sbin/</string>
+		<string>/opt/homebrew/bin/</string>
+		<string>/usr/local/bin/</string>
+	</array>
 </dict>
 </plist>
