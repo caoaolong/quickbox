@@ -15,7 +15,6 @@ APP_SRC="$1"
 VERSION="$2"
 APP_NAME="QuickBox"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
-TMP_DMG="${APP_NAME}-tmp.dmg"
 
 if [ ! -d "$APP_SRC" ]; then
     echo "Error: App bundle not found at '$APP_SRC'"
@@ -31,23 +30,29 @@ echo "    App source: $APP_SRC"
 
 # ---- 1. Prepare staging directory ----
 STAGING=$(mktemp -d)
-cleanup() { rm -rf "$STAGING" /tmp/gen_bg.swift /tmp/gen_bg; }
+# 临时 DMG 放到 mktemp 目录（避免 Spotlight/Finder 自动 reopen 当前工作目录里的 .dmg）
+TMP_DIR=$(mktemp -d)
+TMP_DMG="${TMP_DIR}/${APP_NAME}-tmp.dmg"
+cleanup() { rm -rf "$STAGING" "$TMP_DIR" /tmp/gen_bg.swift /tmp/gen_bg; }
 trap cleanup EXIT
 
-# 确保临时 DMG 完全卸载（CI 上 Finder/Spotlight 慢释放会导致 hdiutil convert 报 EAGAIN）
+# 确保临时 DMG 完全卸载（Finder/Spotlight 慢释放或 reopen 会导致 hdiutil convert 报 EAGAIN）
+# 用 `mount | grep` 判断挂载点是否还在，比依赖 hdiutil info 的 image-path 更可靠：
+# detach 成功后 image-path 仍可能短暂残留，但 mount 表里会立刻消失。
 detach_tmp_dmg() {
     local mp="$1"
     [ -z "$mp" ] && return 0
-    if ! hdiutil detach "$mp" -quiet 2>/dev/null; then
-        sleep 1
-        hdiutil detach "$mp" -force -quiet 2>/dev/null || true
-    fi
-    # 等待镜像不再处于 busy 状态（最多约 22s）
+    # 第一次尝试温和 detach，失败立即 force
+    hdiutil detach "$mp" -quiet 2>/dev/null \
+        || hdiutil detach "$mp" -force -quiet 2>/dev/null \
+        || true
+    # 兜底：循环 force detach，直到 mount 表里看不到这个挂载点（最多约 30s）
     local i
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-        if ! hdiutil info 2>/dev/null | grep -Fq "$TMP_DMG"; then
+    for i in $(seq 1 20); do
+        if ! mount 2>/dev/null | grep -Fq " on $mp "; then
             break
         fi
+        hdiutil detach "$mp" -force -quiet 2>/dev/null || true
         sleep 1.5
     done
     sync
@@ -86,6 +91,14 @@ SWIFT_BIN="/tmp/gen_bg"
 cat > "$SWIFT_SCRIPT" << 'SWIFT'
 import Cocoa
 
+// 生成 DMG 安装窗口背景图。
+// 视觉参考：Apifox 安装包风格 —— 粉紫到蓝绿的对角线柔和渐变，
+// 顶部大标题 + 副标题，中间 5 个递进右箭头表示「拖入」动作，
+// 底部一行操作指引。
+//
+// 不在背景图上绘制 "QuickBox" / "Applications" 文件名 ——
+// Finder 会在图标下方自动渲染这两个文件名。
+
 let args = CommandLine.arguments
 guard args.count > 1 else { exit(1) }
 let outputPath = args[1]
@@ -97,52 +110,96 @@ let size = NSSize(width: w, height: h)
 let img = NSImage(size: size)
 img.lockFocus()
 
-// Gradient background
-let g = NSGradient(
-    starting: NSColor(red: 0.91, green: 0.92, blue: 0.94, alpha: 1),
-    ending: NSColor(red: 0.978, green: 0.98, blue: 0.984, alpha: 1)
-)
-g?.draw(in: NSRect(x: 0, y: 0, width: w, height: h), angle: 90)
+// ── 1. 背景：粉紫 → 中间过渡 → 蓝绿，沿左上 → 右下对角线渐变 ──
+let bg = NSGradient(colors: [
+    NSColor(red: 0.93, green: 0.88, blue: 0.98, alpha: 1.00),  // 左上：粉紫
+    NSColor(red: 0.93, green: 0.92, blue: 0.99, alpha: 1.00),  // 过渡：淡紫白
+    NSColor(red: 0.82, green: 0.94, blue: 0.96, alpha: 1.00),  // 右下：浅蓝绿
+])
+// 315° 对应左上 → 右下方向
+bg?.draw(in: NSRect(x: 0, y: 0, width: w, height: h), angle: 315)
 
-func drawText(_ text: String, x: CGFloat, y: CGFloat, size: CGFloat, weight: NSFont.Weight, color: NSColor) {
-    let font = NSFont.systemFont(ofSize: size, weight: weight)
-    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
-    let str = NSAttributedString(string: text, attributes: attrs)
-    let strSize = str.size()
-    str.draw(at: NSPoint(x: x - strSize.width / 2, y: y))
+// 在背景上叠一层 SF Symbols 风的浅点纹理，让背景不那么平
+let dotColor = NSColor(white: 1, alpha: 0.55)
+dotColor.setFill()
+for row in stride(from: 18, through: h - 18, by: 36) {
+    for col in stride(from: 18, through: w - 18, by: 36) {
+        let r: CGFloat = 1.4
+        let dot = NSBezierPath(ovalIn: NSRect(x: col - r, y: row - r, width: r * 2, height: r * 2))
+        dot.fill()
+    }
 }
 
-func drawArrow(from x1: CGFloat, to x2: CGFloat, y: CGFloat) {
+// 公共绘制工具：水平居中绘制文本
+func drawCenteredText(_ text: String,
+                      centerX: CGFloat,
+                      baselineY: CGFloat,
+                      fontSize: CGFloat,
+                      weight: NSFont.Weight,
+                      color: NSColor) {
+    let font = NSFont.systemFont(ofSize: fontSize, weight: weight)
+    let para = NSMutableParagraphStyle()
+    para.alignment = .center
+    let attrs: [NSAttributedString.Key: Any] = [
+        .font: font,
+        .foregroundColor: color,
+        .paragraphStyle: para,
+    ]
+    let str = NSAttributedString(string: text, attributes: attrs)
+    let sz = str.size()
+    str.draw(at: NSPoint(x: centerX - sz.width / 2, y: baselineY))
+}
+
+// ── 2. 顶部大标题 "QuickBox" ──
+drawCenteredText("QuickBox",
+                 centerX: w / 2,
+                 baselineY: h - 68,
+                 fontSize: 30,
+                 weight: .bold,
+                 color: NSColor(red: 0.13, green: 0.13, blue: 0.18, alpha: 1))
+
+// ── 3. 副标题 ──
+drawCenteredText("极速搜索 · 一键启动 · 高效工作",
+                 centerX: w / 2,
+                 baselineY: h - 102,
+                 fontSize: 13,
+                 weight: .regular,
+                 color: NSColor(white: 0.40, alpha: 1))
+
+// ── 4. 中间 5 个右箭头 (V 形)，从浅到深 ──
+// 图标在 Finder 中位于 (140, 210) 与 (400, 210)，背景图 y 反向，
+// 对应背景图坐标 y = 380 - 210 = 170。
+let arrowY: CGFloat = h - 210
+let arrowStartX: CGFloat = 195
+let arrowEndX: CGFloat = 345
+let arrowCount = 5
+let arrowSpacing = (arrowEndX - arrowStartX) / CGFloat(arrowCount - 1)
+let arrowHalf: CGFloat = 6   // 箭头半宽
+let arrowDepth: CGFloat = 7  // 箭头开口深度
+
+for i in 0..<arrowCount {
+    let cx = arrowStartX + CGFloat(i) * arrowSpacing
+    // 透明度从左到右递增，做出「方向感」
+    let alpha = 0.25 + 0.13 * CGFloat(i)
+    let color = NSColor(red: 0.34, green: 0.46, blue: 0.78, alpha: alpha)
     let path = NSBezierPath()
-    path.lineWidth = 2.5
+    path.move(to: NSPoint(x: cx - arrowDepth, y: arrowY + arrowHalf))
+    path.line(to: NSPoint(x: cx, y: arrowY))
+    path.line(to: NSPoint(x: cx - arrowDepth, y: arrowY - arrowHalf))
+    path.lineWidth = 2.4
     path.lineCapStyle = .round
     path.lineJoinStyle = .round
-
-    path.move(to: NSPoint(x: x1, y: y))
-    path.line(to: NSPoint(x: x2, y: y))
-
-    let head: CGFloat = 8
-    path.move(to: NSPoint(x: x2, y: y))
-    path.line(to: NSPoint(x: x2 - head, y: y - head))
-    path.move(to: NSPoint(x: x2, y: y))
-    path.line(to: NSPoint(x: x2 - head, y: y + head))
-
-    let dash: [CGFloat] = [5, 3]
-    path.setLineDash(dash, count: 2, phase: 0)
-    NSColor(white: 0.5, alpha: 1).setStroke()
+    color.setStroke()
     path.stroke()
 }
 
-// Arrow between icons
-drawArrow(from: 180, to: 360, y: 210)
-
-// Icon labels
-drawText("QuickBox", x: 140, y: 140, size: 13, weight: .medium, color: NSColor(white: 0.35, alpha: 1))
-drawText("Applications", x: 400, y: 140, size: 13, weight: .medium, color: NSColor(white: 0.35, alpha: 1))
-
-// Bottom instruction
-drawText("Drag QuickBox to your Applications folder",
-         x: w / 2, y: 40, size: 14, weight: .regular, color: NSColor(white: 0.5, alpha: 1))
+// ── 5. 底部操作指引 ──
+drawCenteredText("将 QuickBox 拖入 Applications 文件夹完成安装",
+                 centerX: w / 2,
+                 baselineY: 30,
+                 fontSize: 12,
+                 weight: .regular,
+                 color: NSColor(white: 0.45, alpha: 1))
 
 img.unlockFocus()
 
@@ -161,9 +218,19 @@ else
     echo "    (swiftc not available — creating DMG without background)"
 fi
 
-# ---- 3–5. DMG：本地做「可写镜像 + Finder 布局 + 压缩」；CI 上跳过挂载（避免 hdiutil convert EAGAIN）----
+# ---- 3–5. DMG：本地走「可写镜像 + Finder 布局 + 压缩」全流程；
+#          CI 上挂载 Finder 在沙箱里不稳定，改为复用预制的 .DS_Store 模板，
+#          再用 hdiutil create 一步打包（依然带背景图与图标布局）。----
+DS_STORE_TEMPLATE="$(cd "$(dirname "$0")" && pwd)/dmg_assets/DS_Store.template"
+
 if [ "${GITHUB_ACTIONS:-}" = "true" ] || [ "${CI:-}" = "true" ]; then
-    echo "==> Creating compressed DMG (CI：跳过 Finder 定制挂载，避免 convert 资源争用)..."
+    echo "==> Creating compressed DMG (CI：复用 .DS_Store 模板，跳过 Finder 挂载)..."
+    if [ -f "$DS_STORE_TEMPLATE" ]; then
+        cp "$DS_STORE_TEMPLATE" "$STAGING/.DS_Store"
+        echo "    Applied DS_Store template"
+    else
+        echo "    (未找到 $DS_STORE_TEMPLATE，DMG 将使用 Finder 默认布局)"
+    fi
     rm -f "$DMG_NAME"
     hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" \
         -ov -quiet -format UDZO -imagekey zlib-level=9 "$DMG_NAME"
@@ -174,10 +241,20 @@ else
 
     echo "==> Configuring DMG appearance..."
     # -nobrowse：降低 Finder 挂住卷的概率
-    MOUNT_POINT=$(hdiutil attach -readwrite -noverify -noautoopen -nobrowse "$TMP_DMG" 2>/dev/null | \
-        grep "/Volumes/$APP_NAME" | awk '{$1=$2=$3=""; sub(/^[[:space:]]+/, ""); print}')
+    # 已知 volname = $APP_NAME，挂载点就是 /Volumes/$APP_NAME；
+    # 不再依赖解析 hdiutil attach 输出（不同版本字段顺序/分隔符易变）。
+    hdiutil attach -readwrite -noverify -noautoopen -nobrowse "$TMP_DMG" -quiet
+    MOUNT_POINT="/Volumes/$APP_NAME"
 
-    if [ -n "$MOUNT_POINT" ]; then
+    # 等卷真正挂上（最多约 5s）
+    for _i in 1 2 3 4 5; do
+        if mount 2>/dev/null | grep -Fq " on $MOUNT_POINT "; then
+            break
+        fi
+        sleep 1
+    done
+
+    if mount 2>/dev/null | grep -Fq " on $MOUNT_POINT "; then
         sleep 2
 
         osascript <<-EOF 2>/dev/null || true
@@ -190,6 +267,7 @@ else
                 set bounds of container window to {200, 120, 740, 500}
                 set arrangement of icon view options of container window to not arranged
                 set icon size of icon view options of container window to 80
+                set text size of icon view options of container window to 12
 
                 try
                     set background picture of icon view options of container window to file ".background:background.png"
@@ -198,12 +276,26 @@ else
                 set position of item "${APP_NAME}.app" of container window to {140, 210}
                 set position of item "Applications" of container window to {400, 210}
 
+                -- 主动把窗口属性写入 .DS_Store，避免 close 之后 Finder 还在异步刷盘
+                update without registering applications
+                delay 2
                 close
             end tell
         end tell
 EOF
 
-        sleep 2
+        # 等 Finder 异步完成 .DS_Store 写入；不够长 detach 会被 reopen
+        sleep 3
+        sync
+
+        # 本地路径每次都同步一份最新的 .DS_Store 到仓库模板，
+        # 这样后续 CI 构建可以复用相同的窗口/图标布局。
+        if [ -f "$MOUNT_POINT/.DS_Store" ]; then
+            mkdir -p "$(dirname "$DS_STORE_TEMPLATE")"
+            cp "$MOUNT_POINT/.DS_Store" "$DS_STORE_TEMPLATE"
+            echo "    Synced .DS_Store -> $DS_STORE_TEMPLATE"
+        fi
+
         detach_tmp_dmg "$MOUNT_POINT"
     fi
 

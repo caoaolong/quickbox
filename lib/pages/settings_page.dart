@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:window_manager/window_manager.dart';
@@ -7,6 +6,7 @@ import '../services/app_settings.dart';
 import '../services/cloud_sync_service.dart';
 import '../services/index_service.dart';
 import '../services/user_card_store.dart';
+import '../widgets/combo_hotkey_recorder.dart';
 
 class SettingsPage extends StatefulWidget {
   final AppSettings appSettings;
@@ -174,8 +174,9 @@ class _SettingsPageState extends State<SettingsPage> {
             style: TextStyle(fontSize: 14, color: Colors.grey),
           ),
           const SizedBox(height: 16),
-          HotKeyRecorder(
-            initalHotKey: widget.appSettings.hotKey,
+          ComboHotKeyRecorder(
+            initialHotKey: widget.appSettings.hotKey,
+            scope: HotKeyScope.system,
             onHotKeyRecorded: (hotKey) {
               widget.appSettings.setHotKey(hotKey);
               widget.onHotKeyChanged();
@@ -197,8 +198,9 @@ class _SettingsPageState extends State<SettingsPage> {
             style: TextStyle(fontSize: 14, color: Colors.grey),
           ),
           const SizedBox(height: 16),
-          HotKeyRecorder(
-            initalHotKey: widget.appSettings.centerHotKey,
+          ComboHotKeyRecorder(
+            initialHotKey: widget.appSettings.centerHotKey,
+            scope: HotKeyScope.system,
             onHotKeyRecorded: (hotKey) {
               widget.appSettings.setCenterHotKey(hotKey);
               widget.onHotKeyChanged();
@@ -271,9 +273,10 @@ class _SettingsPageState extends State<SettingsPage> {
               style: TextStyle(fontSize: 13, color: Colors.grey),
             ),
             const SizedBox(height: 12),
-            _CardHotKeyDialogCapture(
+            ComboHotKeyRecorder(
               initialHotKey: widget.appSettings.cardHotKeyAt(index),
-              onRecorded: (hotKey) async {
+              scope: HotKeyScope.inapp,
+              onHotKeyRecorded: (hotKey) async {
                 await widget.appSettings.setCardHotKey(index, hotKey);
                 widget.onHotKeyChanged();
                 if (ctx.mounted) Navigator.of(ctx).pop();
@@ -633,61 +636,3 @@ class _CloudSyncTabState extends State<_CloudSyncTab> {
   }
 }
 
-/// 仅用于「卡片快捷键」弹窗：单独注册键盘回调，避免与设置页上的 [HotKeyRecorder] 冲突。
-class _CardHotKeyDialogCapture extends StatefulWidget {
-  const _CardHotKeyDialogCapture({
-    required this.initialHotKey,
-    required this.onRecorded,
-  });
-
-  final HotKey initialHotKey;
-  final Future<void> Function(HotKey hotKey) onRecorded;
-
-  @override
-  State<_CardHotKeyDialogCapture> createState() => _CardHotKeyDialogCaptureState();
-}
-
-class _CardHotKeyDialogCaptureState extends State<_CardHotKeyDialogCapture> {
-  late HotKey _current;
-
-  @override
-  void initState() {
-    super.initState();
-    _current = widget.initialHotKey;
-    HardwareKeyboard.instance.addHandler(_handleKeyEvent);
-  }
-
-  @override
-  void dispose() {
-    HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
-    super.dispose();
-  }
-
-  bool _handleKeyEvent(KeyEvent keyEvent) {
-    if (keyEvent is KeyUpEvent) return false;
-    final physicalKeysPressed = HardwareKeyboard.instance.physicalKeysPressed;
-    final key = keyEvent.physicalKey;
-    List<HotKeyModifier>? modifiers = HotKeyModifier.values
-        .where((e) => e.physicalKeys.any(physicalKeysPressed.contains))
-        .toList();
-    if (modifiers.isNotEmpty) {
-      modifiers = modifiers
-          .where((e) => !e.physicalKeys.contains(key))
-          .toList();
-    }
-    final hotKey = HotKey(
-      identifier: widget.initialHotKey.identifier,
-      key: key,
-      modifiers: modifiers,
-      scope: HotKeyScope.inapp,
-    );
-    setState(() => _current = hotKey);
-    widget.onRecorded(hotKey);
-    return true;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return HotKeyVirtualView(hotKey: _current);
-  }
-}

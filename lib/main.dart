@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +11,7 @@ import 'package:window_manager/window_manager.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'services/app_settings.dart';
 import 'services/cloud_sync_service.dart';
+import 'services/macos_helper.dart';
 import 'services/user_card_store.dart';
 import 'pages/settings_page.dart';
 import 'pages/card_item_form_page.dart';
@@ -36,17 +39,49 @@ class NoScrollbarScrollBehavior extends MaterialScrollBehavior {
 
   @override
   Set<PointerDeviceKind> get dragDevices => {
-        PointerDeviceKind.touch,
-        PointerDeviceKind.mouse,
-        PointerDeviceKind.trackpad,
-        PointerDeviceKind.stylus,
-        PointerDeviceKind.invertedStylus,
-        PointerDeviceKind.unknown,
-      };
+    PointerDeviceKind.touch,
+    PointerDeviceKind.mouse,
+    PointerDeviceKind.trackpad,
+    PointerDeviceKind.stylus,
+    PointerDeviceKind.invertedStylus,
+    PointerDeviceKind.unknown,
+  };
+}
+
+/// macOS 上 Flutter 框架偶现的 `_pressedKeys.containsKey` 断言：
+/// 同一个 `KeyDownEvent` 在 LSUIElement 应用 + alwaysOnTop 窗口
+/// + 焦点切换 / key auto-repeat 等场景下，会被原生侧重复 dispatch，
+/// 触发 [HardwareKeyboard._assertEventIsRegular] 断言失败。
+///
+/// 这是 Flutter 框架已知 issue（仅 debug 模式触发，release 不受影响），
+/// 控制台会被刷屏，但快捷键功能本身仍可正常使用。
+/// 这里仅过滤该特定断言，其他错误一律按原方式上报。
+///
+/// 参考：https://github.com/flutter/flutter/issues/116359
+void _installMacosKeyboardAssertGuard() {
+  if (!kDebugMode || !Platform.isMacOS) return;
+
+  final original = FlutterError.onError;
+  FlutterError.onError = (FlutterErrorDetails details) {
+    final message = details.exceptionAsString();
+    final isKnownKeyAssert =
+        details.exception is AssertionError &&
+        message.contains('KeyDownEvent is dispatched') &&
+        message.contains('already pressed');
+    if (isKnownKeyAssert) {
+      return;
+    }
+    if (original != null) {
+      original(details);
+    } else {
+      FlutterError.presentError(details);
+    }
+  };
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  _installMacosKeyboardAssertGuard();
   await windowManager.ensureInitialized();
   await hotKeyManager.unregisterAll();
 
@@ -171,8 +206,8 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
     _shortcutService = ShortcutService(appSettings: widget.appSettings);
     _shortcutService.onToggleWindow = _toggleWindow;
     _shortcutService.onCenterWindow = _centerWindow;
-    _shortcutService.shouldHandleCardShortcuts =
-        () => !_isOnSettingsPage && mounted;
+    _shortcutService.shouldHandleCardShortcuts = () =>
+        !_isOnSettingsPage && mounted;
     _shortcutService.onCardShortcut = (index) {
       _searchController.clear();
       _openCard(index);
@@ -225,12 +260,19 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       await windowManager.setSize(const Size(800, 400));
       await windowManager.show();
       await windowManager.focus();
+      await MacosHelper.activateApp();
       _focusSearchField();
     }
   }
 
   void _centerWindow() async {
+    // 先确保窗口可见、被激活，再居中；否则在主窗口隐藏时按下「居中」无可见效果。
+    if (!await windowManager.isVisible()) {
+      await windowManager.show();
+    }
     await windowManager.center();
+    await windowManager.focus();
+    await MacosHelper.activateApp();
   }
 
   void _focusSearchField() {
@@ -260,7 +302,11 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       mainAxisSize: MainAxisSize.min,
       children: [
         IconButton(
-          icon: const Icon(Icons.edit_outlined, color: Colors.white70, size: 22),
+          icon: const Icon(
+            Icons.edit_outlined,
+            color: Colors.white70,
+            size: 22,
+          ),
           tooltip: '编辑',
           visualDensity: VisualDensity.compact,
           padding: EdgeInsets.zero,
@@ -268,7 +314,11 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
           onPressed: () => card.itemInteractor.onItemEdit(context, item),
         ),
         IconButton(
-          icon: const Icon(Icons.delete_outline, color: Colors.white70, size: 22),
+          icon: const Icon(
+            Icons.delete_outline,
+            color: Colors.white70,
+            size: 22,
+          ),
           tooltip: '删除',
           visualDensity: VisualDensity.compact,
           padding: EdgeInsets.zero,
@@ -289,7 +339,11 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       mainAxisSize: MainAxisSize.min,
       children: [
         IconButton(
-          icon: const Icon(Icons.edit_outlined, color: Colors.white70, size: 22),
+          icon: const Icon(
+            Icons.edit_outlined,
+            color: Colors.white70,
+            size: 22,
+          ),
           tooltip: '编辑',
           visualDensity: VisualDensity.compact,
           padding: EdgeInsets.zero,
@@ -297,7 +351,11 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
           onPressed: () => card.itemInteractor.onItemEdit(context, item),
         ),
         IconButton(
-          icon: const Icon(Icons.delete_outline, color: Colors.white70, size: 22),
+          icon: const Icon(
+            Icons.delete_outline,
+            color: Colors.white70,
+            size: 22,
+          ),
           tooltip: '删除',
           visualDensity: VisualDensity.compact,
           padding: EdgeInsets.zero,
@@ -553,6 +611,8 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
     await windowManager.setSize(const Size(800, 400));
     await windowManager.show();
     await windowManager.focus();
+    // macOS LSUIElement 应用窗口默认拿不到键盘焦点，需要强制激活以接收键盘事件。
+    await MacosHelper.activateApp();
     _focusSearchField();
   }
 
@@ -560,6 +620,9 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
     setState(() => _isOnSettingsPage = true);
     await windowManager.show();
     await windowManager.focus();
+    // macOS 上设置页里的 HotKeyRecorder 依赖 HardwareKeyboard，
+    // 必须确保进程被激活、主窗口成为 key window，否则按键事件无法到达。
+    await MacosHelper.activateApp();
   }
 
   Widget _buildCardGrid(BuildContext context) {
@@ -590,7 +653,10 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
       return;
     }
     setState(() {
-      _displayedItemCount = (_displayedItemCount + 30).clamp(0, _cardItems.length);
+      _displayedItemCount = (_displayedItemCount + 30).clamp(
+        0,
+        _cardItems.length,
+      );
     });
   }
 
@@ -641,7 +707,9 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
           Container(
             height: 48,
             decoration: BoxDecoration(
-              gradient: LinearGradient(colors: gradientColorsWithAlpha(card.gradient)),
+              gradient: LinearGradient(
+                colors: gradientColorsWithAlpha(card.gradient),
+              ),
             ),
             child: Row(
               children: [
@@ -677,7 +745,9 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                 ),
               ),
               child: _isLoading
-                  ? const Center(child: CircularProgressIndicator(color: Colors.white54))
+                  ? const Center(
+                      child: CircularProgressIndicator(color: Colors.white54),
+                    )
                   : ListView.separated(
                       controller: _cardListScrollController,
                       padding: const EdgeInsets.symmetric(vertical: 4),
@@ -713,9 +783,16 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                             style: const TextStyle(color: Colors.white),
                           ),
                           subtitle: item.subtitle != null
-                              ? Text(item.subtitle!, style: const TextStyle(color: Colors.white54))
+                              ? Text(
+                                  item.subtitle!,
+                                  style: const TextStyle(color: Colors.white54),
+                                )
                               : null,
-                          leading: _AppIcon(iconPath: item.iconPath, iconBytes: item.iconBytes, fallback: item.icon),
+                          leading: _AppIcon(
+                            iconPath: item.iconPath,
+                            iconBytes: item.iconBytes,
+                            fallback: item.icon,
+                          ),
                           trailing: _selectedCardIndex == 0
                               ? _userEntryTrailing(context, card, item)
                               : _userEntryDeleteOnly(context, card, item),
@@ -755,21 +832,27 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
           key: _searchResultKeys[i],
           selected: isSelected,
           selectedTileColor: Colors.lightBlue.withAlpha(46),
-          title: Text(
-            item.title,
-            style: const TextStyle(color: Colors.white),
-          ),
+          title: Text(item.title, style: const TextStyle(color: Colors.white)),
           subtitle: item.subtitle != null
-              ? Text(item.subtitle!, style: const TextStyle(color: Colors.white54))
+              ? Text(
+                  item.subtitle!,
+                  style: const TextStyle(color: Colors.white54),
+                )
               : null,
-          leading: _AppIcon(iconPath: item.iconPath, iconBytes: item.iconBytes, fallback: item.icon),
+          leading: _AppIcon(
+            iconPath: item.iconPath,
+            iconBytes: item.iconBytes,
+            fallback: item.icon,
+          ),
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
-                  color: gradientColorsWithAlpha(card.gradient).first.withAlpha(130),
+                  color: gradientColorsWithAlpha(
+                    card.gradient,
+                  ).first.withAlpha(130),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
@@ -778,8 +861,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                 ),
               ),
               if (item.isUserEntry) const SizedBox(width: 4),
-              if (item.isUserEntry)
-                _userEntryTrailing(context, card, item)!,
+              if (item.isUserEntry) _userEntryTrailing(context, card, item)!,
             ],
           ),
           onTap: () => card.itemInteractor.onItemTap(item),
@@ -812,14 +894,18 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
           key: _localSearchResultKeys[i],
           selected: isSelected,
           selectedTileColor: Colors.lightBlue.withAlpha(46),
-          title: Text(
-            item.title,
-            style: const TextStyle(color: Colors.white),
-          ),
+          title: Text(item.title, style: const TextStyle(color: Colors.white)),
           subtitle: item.subtitle != null
-              ? Text(item.subtitle!, style: const TextStyle(color: Colors.white54))
+              ? Text(
+                  item.subtitle!,
+                  style: const TextStyle(color: Colors.white54),
+                )
               : null,
-          leading: _AppIcon(iconPath: item.iconPath, iconBytes: item.iconBytes, fallback: item.icon),
+          leading: _AppIcon(
+            iconPath: item.iconPath,
+            iconBytes: item.iconBytes,
+            fallback: item.icon,
+          ),
           trailing: _selectedCardIndex == 0
               ? _userEntryTrailing(context, card, item)
               : _userEntryDeleteOnly(context, card, item),
@@ -910,11 +996,11 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
                   Expanded(
                     child: _searchQuery.trim().isNotEmpty
                         ? (_selectedCardIndex < 0
-                            ? _buildSearchResults()
-                            : _buildLocalSearchResults())
+                              ? _buildSearchResults()
+                              : _buildLocalSearchResults())
                         : _selectedCardIndex == -1
-                            ? _buildCardGrid(context)
-                            : _buildCardList(),
+                        ? _buildCardGrid(context)
+                        : _buildCardList(),
                   ),
                 ],
               ),
@@ -1033,7 +1119,9 @@ class _AppIconState extends State<_AppIcon> {
   @override
   void didUpdateWidget(_AppIcon old) {
     super.didUpdateWidget(old);
-    if (old.iconPath != widget.iconPath || old.iconBytes != widget.iconBytes) _load();
+    if (old.iconPath != widget.iconPath || old.iconBytes != widget.iconBytes) {
+      _load();
+    }
   }
 
   Future<void> _load() async {
@@ -1065,5 +1153,3 @@ class _AppIconState extends State<_AppIcon> {
     return Icon(widget.fallback, color: Colors.white70);
   }
 }
-
-
