@@ -5,8 +5,9 @@
 #
 # Produces: QuickBox-<version>.dmg
 # The DMG includes the app bundle, an Applications symlink, a custom
-# background with drag-to-Applications instruction, and proper icon
-# positioning — the standard macOS installer experience.
+# background with drag-to-Applications instruction, and (when not on CI)
+# proper icon positioning via Finder — the standard macOS installer experience.
+# On GITHUB_ACTIONS/CI, a single UDZO create step is used to avoid hdiutil convert EAGAIN.
 
 set -euo pipefail
 
@@ -41,25 +42,30 @@ detach_tmp_dmg() {
         sleep 1
         hdiutil detach "$mp" -force -quiet 2>/dev/null || true
     fi
-    # 等待镜像不再处于 busy 状态（最多约 15s）
+    # 等待镜像不再处于 busy 状态（最多约 22s）
     local i
-    for i in 1 2 3 4 5 6 7 8 9 10; do
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         if ! hdiutil info 2>/dev/null | grep -Fq "$TMP_DMG"; then
             break
         fi
         sleep 1.5
     done
+    sync
 }
 
 hdiutil_convert_with_retry() {
-    local attempt
-    for attempt in 1 2 3 4 5; do
+    local attempt=1 max_attempts=12 base_sleep=3
+    while [ "$attempt" -le "$max_attempts" ]; do
         rm -f "$DMG_NAME"
-        if hdiutil convert "$TMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_NAME"; then
+        sync
+        # -quiet 减少日志噪声；-ov 与事先 rm 一致，双保险
+        if hdiutil convert "$TMP_DMG" -quiet -format UDZO -imagekey zlib-level=9 -ov -o "$DMG_NAME"; then
             return 0
         fi
-        echo "    (convert 第 $attempt 次失败，5 次内重试，等待释放 DMG…)"
-        sleep 3
+        echo "    (convert 第 $attempt 次失败，${max_attempts} 次内重试，等待释放 DMG…)"
+        # 指数退避：CI/Spotlight 释放较慢时比固定 3s 更有效
+        sleep $((base_sleep + attempt * 2))
+        attempt=$((attempt + 1))
     done
     return 1
 }
@@ -155,51 +161,56 @@ else
     echo "    (swiftc not available — creating DMG without background)"
 fi
 
-# ---- 3. Create read-write DMG ----
-echo "==> Creating temporary DMG..."
-hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" \
-    -ov -format UDRW -fs HFS+ "$TMP_DMG"
+# ---- 3–5. DMG：本地做「可写镜像 + Finder 布局 + 压缩」；CI 上跳过挂载（避免 hdiutil convert EAGAIN）----
+if [ "${GITHUB_ACTIONS:-}" = "true" ] || [ "${CI:-}" = "true" ]; then
+    echo "==> Creating compressed DMG (CI：跳过 Finder 定制挂载，避免 convert 资源争用)..."
+    rm -f "$DMG_NAME"
+    hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" \
+        -ov -quiet -format UDZO -imagekey zlib-level=9 "$DMG_NAME"
+else
+    echo "==> Creating temporary DMG..."
+    hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" \
+        -ov -format UDRW -fs HFS+ "$TMP_DMG"
 
-# ---- 4. Mount and configure with Finder settings ----
-echo "==> Configuring DMG appearance..."
-# -nobrowse：避免 Finder 挂住卷，降低 GitHub Actions 上 convert 出现 EAGAIN 的概率
-MOUNT_POINT=$(hdiutil attach -readwrite -noverify -noautoopen -nobrowse "$TMP_DMG" 2>/dev/null | \
-    grep "/Volumes/$APP_NAME" | awk '{$1=$2=$3=""; sub(/^[[:space:]]+/, ""); print}')
+    echo "==> Configuring DMG appearance..."
+    # -nobrowse：降低 Finder 挂住卷的概率
+    MOUNT_POINT=$(hdiutil attach -readwrite -noverify -noautoopen -nobrowse "$TMP_DMG" 2>/dev/null | \
+        grep "/Volumes/$APP_NAME" | awk '{$1=$2=$3=""; sub(/^[[:space:]]+/, ""); print}')
 
-if [ -n "$MOUNT_POINT" ]; then
-    sleep 2
+    if [ -n "$MOUNT_POINT" ]; then
+        sleep 2
 
-    osascript <<-EOF 2>/dev/null || true
-    tell application "Finder"
-        tell disk "$APP_NAME"
-            open
-            set current view of container window to icon view
-            set toolbar visible of container window to false
-            set statusbar visible of container window to false
-            set bounds of container window to {200, 120, 740, 500}
-            set arrangement of icon view options of container window to not arranged
-            set icon size of icon view options of container window to 80
+        osascript <<-EOF 2>/dev/null || true
+        tell application "Finder"
+            tell disk "$APP_NAME"
+                open
+                set current view of container window to icon view
+                set toolbar visible of container window to false
+                set statusbar visible of container window to false
+                set bounds of container window to {200, 120, 740, 500}
+                set arrangement of icon view options of container window to not arranged
+                set icon size of icon view options of container window to 80
 
-            try
-                set background picture of icon view options of container window to file ".background:background.png"
-            end try
+                try
+                    set background picture of icon view options of container window to file ".background:background.png"
+                end try
 
-            set position of item "${APP_NAME}.app" of container window to {140, 210}
-            set position of item "Applications" of container window to {400, 210}
+                set position of item "${APP_NAME}.app" of container window to {140, 210}
+                set position of item "Applications" of container window to {400, 210}
 
-            close
+                close
+            end tell
         end tell
-    end tell
 EOF
 
-    sleep 2
-    detach_tmp_dmg "$MOUNT_POINT"
-fi
+        sleep 2
+        detach_tmp_dmg "$MOUNT_POINT"
+    fi
 
-# ---- 5. Convert to compressed DMG ----
-echo "==> Compressing final DMG..."
-hdiutil_convert_with_retry
-rm -f "$TMP_DMG"
+    echo "==> Compressing final DMG..."
+    hdiutil_convert_with_retry
+    rm -f "$TMP_DMG"
+fi
 
 echo ""
 echo "Done! DMG created: $DMG_NAME"
