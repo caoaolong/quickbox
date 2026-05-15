@@ -12,6 +12,7 @@ class AppSettings extends ChangeNotifier {
   static const _centerHotkeyJsonKey = 'center_hotkey_json';
   static const _cardHotkeysJsonKey = 'card_hotkeys_json';
   static const _dataRootKey = 'data_root';
+
   /// 旧版仅保存索引子目录的完整路径，用于迁移到 data_root
   static const _indexDirLegacyKey = 'index_directory';
   static const _cloudSyncEnabledKey = 'cloud_sync_enabled';
@@ -42,6 +43,7 @@ class AppSettings extends ChangeNotifier {
   HotKey? get hotKey => _hotKey;
   HotKey? get centerHotKey => _centerHotKey;
   List<HotKey> get cardHotKeys => List.unmodifiable(_cardHotKeys);
+
   /// 用户数据根目录（其下含 `index` 子目录与 `user_entries.json`）
   String get dataRoot => _dataRoot;
 
@@ -74,11 +76,7 @@ class AppSettings extends ChangeNotifier {
         _hotKey = HotKey.fromJson(jsonDecode(hotkeyJson));
       } catch (_) {}
     }
-    _hotKey ??= HotKey(
-      key: const PhysicalKeyboardKey(0x0007002C),
-      modifiers: [HotKeyModifier.control, HotKeyModifier.shift],
-      scope: HotKeyScope.system,
-    );
+    _hotKey ??= _defaultToggleHotKey();
 
     final centerJson = prefs.getString(_centerHotkeyJsonKey);
     if (centerJson != null) {
@@ -86,11 +84,7 @@ class AppSettings extends ChangeNotifier {
         _centerHotKey = HotKey.fromJson(jsonDecode(centerJson));
       } catch (_) {}
     }
-    _centerHotKey ??= HotKey(
-      key: const PhysicalKeyboardKey(0x0007002C),
-      modifiers: [HotKeyModifier.control],
-      scope: HotKeyScope.system,
-    );
+    _centerHotKey ??= _defaultCenterHotKey();
 
     final cardJson = prefs.getString(_cardHotkeysJsonKey);
     if (cardJson != null) {
@@ -98,7 +92,10 @@ class AppSettings extends ChangeNotifier {
         final list = jsonDecode(cardJson) as List<dynamic>;
         if (list.length == cardShortcutCount) {
           _cardHotKeys = list
-              .map((e) => _asInAppHotKey(HotKey.fromJson(e as Map<String, dynamic>)))
+              .map(
+                (e) =>
+                    _asInAppHotKey(HotKey.fromJson(e as Map<String, dynamic>)),
+              )
               .toList();
         } else {
           _initDefaultCardHotKeys();
@@ -227,7 +224,10 @@ class AppSettings extends ChangeNotifier {
     }
     final appData = Platform.environment['APPDATA'];
     if (appData != null) {
-      return _joinPath(_normalizePath('$appData\\quickbox'), 'user_entries.json');
+      return _joinPath(
+        _normalizePath('$appData\\quickbox'),
+        'user_entries.json',
+      );
     }
     return _joinPath(
       _normalizePath(
@@ -278,6 +278,39 @@ class AppSettings extends ChangeNotifier {
     _cardHotKeys[index] = _asInAppHotKey(hotKey);
     await _persistCardHotKeys();
     notifyListeners();
+  }
+
+  HotKey _defaultToggleHotKey() {
+    if (Platform.isMacOS) {
+      return HotKey(
+        key: PhysicalKeyboardKey.backquote,
+        modifiers: [HotKeyModifier.meta],
+        scope: HotKeyScope.system,
+      );
+    }
+    return HotKey(
+      key: PhysicalKeyboardKey.space,
+      modifiers: [HotKeyModifier.control, HotKeyModifier.shift],
+      scope: HotKeyScope.system,
+    );
+  }
+
+  /// 默认「窗口居中」全局快捷键。
+  /// - macOS：⌘ + Q（注：会拦截系统的 ⌘+Q 退出快捷键，用户在设置页可改）
+  /// - 其他平台：Ctrl + Space
+  HotKey _defaultCenterHotKey() {
+    if (Platform.isMacOS) {
+      return HotKey(
+        key: PhysicalKeyboardKey.keyQ,
+        modifiers: [HotKeyModifier.meta],
+        scope: HotKeyScope.system,
+      );
+    }
+    return HotKey(
+      key: PhysicalKeyboardKey.space,
+      modifiers: [HotKeyModifier.control],
+      scope: HotKeyScope.system,
+    );
   }
 
   void _initDefaultCardHotKeys() {
