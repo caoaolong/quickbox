@@ -30,6 +30,8 @@ class _SettingsPageState extends State<SettingsPage> {
   int _selectedIndex = 0;
   bool _isBuildingIndex = false;
   String _indexStatus = '';
+  final GlobalKey<_CloudSyncTabState> _cloudSyncTabKey =
+      GlobalKey<_CloudSyncTabState>();
 
   @override
   void initState() {
@@ -62,6 +64,13 @@ class _SettingsPageState extends State<SettingsPage> {
             onPressed: () => windowManager.hide(),
             child: const Text('完成'),
           ),
+          if (_selectedIndex == 3)
+            IconButton(
+              icon: const Icon(Icons.save_outlined),
+              tooltip: '保存',
+              onPressed: () =>
+                  _cloudSyncTabKey.currentState?.saveCloudSyncSettings(),
+            ),
         ],
       ),
       body: Row(
@@ -111,6 +120,7 @@ class _SettingsPageState extends State<SettingsPage> {
         return _buildDataTab();
       case 3:
         return _CloudSyncTab(
+          key: _cloudSyncTabKey,
           appSettings: widget.appSettings,
           userCardStore: widget.userCardStore,
           onCloudSyncApplied: widget.onCloudSyncApplied,
@@ -407,6 +417,7 @@ class _SettingsPageState extends State<SettingsPage> {
 /// S3 兼容 OSS 配置与同步操作。
 class _CloudSyncTab extends StatefulWidget {
   const _CloudSyncTab({
+    super.key,
     required this.appSettings,
     required this.userCardStore,
     required this.onCloudSyncApplied,
@@ -480,6 +491,9 @@ class _CloudSyncTabState extends State<_CloudSyncTab> {
       const SnackBar(content: Text('云同步设置已保存')),
     );
   }
+
+  /// 供设置页 AppBar 保存按钮调用
+  Future<void> saveCloudSyncSettings() => _save();
 
   Future<void> _downloadFromCloud() async {
     if (_downloading) return;
@@ -621,15 +635,7 @@ class _CloudSyncTabState extends State<_CloudSyncTab> {
               label: Text(_downloading ? '正在下载…' : '从云端下载（使用已保存的配置）'),
             ),
           ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              onPressed: _save,
-              icon: const Icon(Icons.save),
-              label: const Text('保存'),
-            ),
-          ),
+          const SizedBox(height: 8),
         ],
       ),
     );

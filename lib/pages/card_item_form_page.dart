@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
@@ -32,6 +33,8 @@ class CardItemFormPage extends StatefulWidget {
 
 class _CardItemFormPageState extends State<CardItemFormPage> {
   final _primaryController = TextEditingController();
+  TextEditingController? _webCustomTitleController;
+  bool _useCustomWebTitle = false;
   bool _saving = false;
   String? _error;
 
@@ -44,6 +47,11 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
   TextEditingController? _noteContent;
   String _noteKind = NoteKind.note;
   String? _editingNoteId;
+
+  /// 快捷指令：是否在终端中保留窗口（执行后等待）；新建默认开启。
+  bool _commandWaitAfterRun = true;
+
+  TextEditingController? _commandTitleController;
 
   bool get _isEditing => widget.editingItem != null;
 
@@ -86,6 +94,36 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
           _noteKind = NoteKind.note;
         }
       }
+    } else if (widget.cardIndex == 1) {
+      _webCustomTitleController = TextEditingController();
+      if (e != null) {
+        _primaryController.text = (e.data as String?) ?? '';
+        final url = _primaryController.text;
+        WidgetsBinding.instance.addPostFrameCallback((_) async {
+          final ct = await widget.userCardStore.getWebCustomTitle(url);
+          if (!mounted) return;
+          setState(() {
+            _useCustomWebTitle = ct != null && ct.isNotEmpty;
+            _webCustomTitleController!.text = ct ?? '';
+          });
+        });
+      }
+    } else if (widget.cardIndex == 2) {
+      _commandTitleController = TextEditingController();
+      if (e != null) {
+        final d = e.data;
+        if (d is Map) {
+          _primaryController.text = d['command']?.toString() ?? '';
+          _commandWaitAfterRun = d['waitAfterRun'] != false;
+          final tit = d['title']?.toString().trim();
+          if (tit != null && tit.isNotEmpty) {
+            _commandTitleController!.text = tit;
+          }
+        } else {
+          _primaryController.text = (d as String?) ?? '';
+          _commandWaitAfterRun = true;
+        }
+      }
     } else if (e != null) {
       _primaryController.text = (e.data as String?) ?? '';
     }
@@ -103,6 +141,8 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
     _tokenValue?.dispose();
     _noteTitle?.dispose();
     _noteContent?.dispose();
+    _webCustomTitleController?.dispose();
+    _commandTitleController?.dispose();
     super.dispose();
   }
 
@@ -130,6 +170,127 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
 
   void _configureHttpClient(HttpClient client) {
     client.userAgent = _httpUserAgent;
+  }
+
+  void _applyHtmlFetchHeaders(HttpClientRequest request) {
+    request.headers.set(
+      HttpHeaders.acceptHeader,
+      'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    );
+    request.headers.set(
+      HttpHeaders.acceptLanguageHeader,
+      'zh-CN,zh;q=0.9,en-US,en;q=0.8',
+    );
+  }
+
+  /// 去掉 UTF-8 BOM，并按 Content-Type / 常见别名解码 HTML。
+  String _decodeHtmlBodyBytes(Uint8List raw, String? contentTypeHeader) {
+    var bytes = raw;
+    if (bytes.length >= 3 &&
+        bytes[0] == 0xEF &&
+        bytes[1] == 0xBB &&
+        bytes[2] == 0xBF) {
+      bytes = bytes.sublist(3);
+    }
+
+    String? charset;
+    if (contentTypeHeader != null && contentTypeHeader.isNotEmpty) {
+      final m = RegExp(
+        r'charset\s*=\s*([^\s;]+)',
+        caseSensitive: false,
+      ).firstMatch(contentTypeHeader);
+      if (m != null) {
+        charset =
+            m.group(1)!.replaceAll('"', '').replaceAll("'", '').toLowerCase();
+      }
+    }
+
+    String tryCharset(String? cs) {
+      if (cs == null || cs.isEmpty || cs == 'utf-8' || cs == 'utf8') {
+        return utf8.decode(bytes, allowMalformed: true);
+      }
+      final enc = Encoding.getByName(cs);
+      if (enc != null) {
+        try {
+          return enc.decode(bytes);
+        } catch (_) {}
+      }
+      return utf8.decode(bytes, allowMalformed: true);
+    }
+
+    var html = tryCharset(charset);
+    if (charset == null || charset.isEmpty) {
+      final meta = RegExp(
+        r'''<meta\s+charset\s*=\s*['"]?([^'">\s]+)''',
+        caseSensitive: false,
+      ).firstMatch(html.substring(0, math.min(html.length, 4096)));
+      final mc = meta?.group(1)?.toLowerCase();
+      if (mc != null && mc.isNotEmpty && mc != 'utf-8' && mc != 'utf8') {
+        html = tryCharset(mc);
+      }
+    }
+    return html;
+  }
+
+  String _decodeHtmlEntities(String input) {
+    var s = input.replaceAll('&nbsp;', ' ');
+    s = s.replaceAllMapped(RegExp(r'&#x([0-9a-fA-F]+);'), (m) {
+      final hex = m.group(1)!;
+      final cp = int.tryParse(hex, radix: 16);
+      if (cp == null) return m.group(0)!;
+      return String.fromCharCode(cp);
+    });
+    s = s.replaceAllMapped(RegExp(r'&#(\d+);'), (m) {
+      final cp = int.tryParse(m.group(1)!);
+      if (cp == null) return m.group(0)!;
+      return String.fromCharCode(cp);
+    });
+    return s
+        .replaceAll('&quot;', '"')
+        .replaceAll('&apos;', "'")
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&amp;', '&');
+  }
+
+  /// 从 HTML 中取标题：<title> → og:title → twitter:title。
+  String? _extractPageTitle(String html) {
+    final patterns = <RegExp>[
+      RegExp(r'<title[^>]*>(.*?)</title>', dotAll: true, caseSensitive: false),
+      RegExp(
+        r'''property\s*=\s*["']og:title["']\s+content\s*=\s*["']([^"']+)["']''',
+        caseSensitive: false,
+      ),
+      RegExp(
+        r'''content\s*=\s*["']([^"']+)["']\s+property\s*=\s*["']og:title["']''',
+        caseSensitive: false,
+      ),
+      RegExp(
+        r'''name\s*=\s*["']twitter:title["']\s+content\s*=\s*["']([^"']+)["']''',
+        caseSensitive: false,
+      ),
+      RegExp(
+        r'''content\s*=\s*["']([^"']+)["']\s+name\s*=\s*["']twitter:title["']''',
+        caseSensitive: false,
+      ),
+    ];
+
+    String? raw;
+    for (final re in patterns) {
+      final m = re.firstMatch(html);
+      final s = m?.group(1)?.trim();
+      if (s != null && s.isNotEmpty) {
+        raw = s;
+        break;
+      }
+    }
+
+    if (raw == null || raw.isEmpty) return null;
+    var cleaned =
+        raw.replaceAll(RegExp(r'<[^>]+>'), '');
+    cleaned =
+        _decodeHtmlEntities(cleaned).trim().replaceAll(RegExp(r'\s+'), ' ');
+    return cleaned.isEmpty ? null : cleaned;
   }
 
   Uri _faviconIcoUri(Uri pageUri) {
@@ -234,21 +395,26 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
       HttpClientResponse? pageResponse;
       try {
         final request = await client.getUrl(uri);
+        _applyHtmlFetchHeaders(request);
         pageResponse = await request.close();
       } catch (_) {
         return (title: null, favicon: await _fetchFaviconFallbacks(client, uri));
       }
 
-      if (pageResponse.statusCode != 200) {
+      final code = pageResponse.statusCode;
+      if (code >= 500 || code == 204 || code == 205) {
         await pageResponse.drain<void>();
         return (title: null, favicon: await _fetchFaviconFallbacks(client, uri));
       }
 
-      final body = await pageResponse.transform(utf8.decoder).join();
-      final m = RegExp(r'<title[^>]*>(.*?)</title>', dotAll: true, caseSensitive: false)
-          .firstMatch(body);
-      final rawTitle = m?.group(1)?.trim();
-      title = (rawTitle != null && rawTitle.isNotEmpty) ? rawTitle : null;
+      final ct = pageResponse.headers.value(HttpHeaders.contentTypeHeader);
+      final bodyBytesBuilder = BytesBuilder(copy: false);
+      await for (final chunk in pageResponse) {
+        bodyBytesBuilder.add(chunk);
+      }
+      final rawBytes = bodyBytesBuilder.takeBytes();
+      final bodyStr = _decodeHtmlBodyBytes(rawBytes, ct);
+      title = _extractPageTitle(bodyStr);
 
       Uint8List? favicon;
 
@@ -256,7 +422,7 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
         r'''^\s*data:image/[^;]+;base64,([a-zA-Z0-9+/=\s]+)''',
         caseSensitive: false,
       );
-      for (final link in RegExp(r'<link\s([^>]+)>', caseSensitive: false).allMatches(body)) {
+      for (final link in RegExp(r'<link\s([^>]+)>', caseSensitive: false).allMatches(bodyStr)) {
         final attrs = link.group(1)!;
         final relLower = attrs.toLowerCase();
         if (!relLower.contains('icon')) continue;
@@ -295,7 +461,7 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
 
       return (title: title, favicon: favicon);
     } finally {
-      client.close();
+      client.close(force: true);
     }
   }
 
@@ -424,12 +590,19 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
           setState(() => _error = 'URL 需以 http:// 或 https:// 开头');
           return;
         }
+        final customTrim = _webCustomTitleController?.text.trim() ?? '';
+        if (_useCustomWebTitle && customTrim.isEmpty) {
+          setState(() => _error = '请填写自定义标题');
+          return;
+        }
         String? fetchedTitle;
         Uint8List? faviconBytes;
         try {
           final meta = await _fetchWebPageMetadata(primary);
-          fetchedTitle = meta.title;
           faviconBytes = meta.favicon;
+          if (!_useCustomWebTitle) {
+            fetchedTitle = meta.title;
+          }
         } catch (_) {}
         if (old != null) {
           await widget.userCardStore.updateWeb(
@@ -437,12 +610,15 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
             url: primary,
             fetchedTitle: fetchedTitle,
             faviconBytes: faviconBytes,
+            customTitle: _useCustomWebTitle ? customTrim : null,
+            removeCustomTitle: !_useCustomWebTitle,
           );
         } else {
           await widget.userCardStore.addWeb(
             url: primary,
             fetchedTitle: fetchedTitle,
             faviconBytes: faviconBytes,
+            customTitle: _useCustomWebTitle ? customTrim : null,
           );
         }
         break;
@@ -451,13 +627,25 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
           setState(() => _error = '请填写命令内容');
           return;
         }
+        final titleOpt = _commandTitleController?.text.trim();
         if (old != null) {
+          final od = old.data;
+          final oldCmd = od is Map
+              ? (od['command'] as String?) ?? ''
+              : od as String? ?? '';
           await widget.userCardStore.updateCommand(
-            oldCommand: old.data as String,
+            oldCommand: oldCmd,
             command: primary,
+            tags: old.tags,
+            waitAfterRun: _commandWaitAfterRun,
+            title: titleOpt,
           );
         } else {
-          await widget.userCardStore.addCommand(command: primary);
+          await widget.userCardStore.addCommand(
+            command: primary,
+            waitAfterRun: _commandWaitAfterRun,
+            title: titleOpt,
+          );
         }
         break;
       case 3:
@@ -515,6 +703,16 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
     Navigator.of(context).pop(true);
   }
 
+  Future<void> _submitSave() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    try {
+      await _save();
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final primaryLabel = switch (widget.cardIndex) {
@@ -526,7 +724,7 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
     final primaryHint = switch (widget.cardIndex) {
       0 => r'例如 C:\Program Files\App\app.exe',
       1 => 'https://',
-      2 => '将交由 cmd /c 执行',
+      2 => '输入要在终端中执行的命令',
       _ => '',
     };
     final primaryLines = widget.cardIndex == 2 ? 5 : 1;
@@ -552,6 +750,22 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
         foregroundColor: Colors.white,
         elevation: 0,
         scrolledUnderElevation: 0,
+        actions: [
+          IconButton(
+            tooltip: '保存',
+            onPressed: _saving ? null : _submitSave,
+            icon: _saving
+                ? const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(Icons.save_outlined),
+          ),
+        ],
       ),
       body: ClipRRect(
         borderRadius: const BorderRadius.vertical(bottom: Radius.circular(16)),
@@ -567,7 +781,7 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
             ListView(
               padding: const EdgeInsets.all(20),
               children: [
-                if (primaryLabel.isNotEmpty) ...[
+                if (primaryLabel.isNotEmpty && widget.cardIndex != 2) ...[
                   Text(primaryLabel, style: const TextStyle(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 8),
                 ],
@@ -595,6 +809,96 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
                   )
                 else if (widget.cardIndex == 3)
                   _buildNoteTypeForm()
+                else if (widget.cardIndex == 1)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      TextField(
+                        controller: _primaryController,
+                        maxLines: 1,
+                        decoration: InputDecoration(
+                          hintText: primaryHint,
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('自定义标题'),
+                        value: _useCustomWebTitle,
+                        onChanged: (v) =>
+                            setState(() => _useCustomWebTitle = v),
+                      ),
+                      if (_useCustomWebTitle && _webCustomTitleController != null)
+                        TextField(
+                          controller: _webCustomTitleController,
+                          decoration: const InputDecoration(
+                            labelText: '标题',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                    ],
+                  )
+                else if (widget.cardIndex == 2)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      TextField(
+                        controller: _commandTitleController,
+                        decoration: const InputDecoration(
+                          labelText: '标题',
+                          hintText: '留空则与下方命令正文一致',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        primaryLabel,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _primaryController,
+                        maxLines: primaryLines,
+                        decoration: InputDecoration(
+                          hintText: primaryHint,
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Text(
+                            '运行方式',
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: SegmentedButton<bool>(
+                              segments: const [
+                                ButtonSegment<bool>(
+                                  value: false,
+                                  label: Text('执行后关闭'),
+                                ),
+                                ButtonSegment<bool>(
+                                  value: true,
+                                  label: Text('执行后等待'),
+                                ),
+                              ],
+                              emptySelectionAllowed: false,
+                              showSelectedIcon: false,
+                              selected: <bool>{_commandWaitAfterRun},
+                              onSelectionChanged: (Set<bool> next) {
+                                setState(() => _commandWaitAfterRun = next.first);
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  )
                 else
                   TextField(
                     controller: _primaryController,
@@ -608,27 +912,7 @@ class _CardItemFormPageState extends State<CardItemFormPage> {
                   const SizedBox(height: 12),
                   Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
                 ],
-                const SizedBox(height: 28),
-                FilledButton.icon(
-                  onPressed: _saving
-                      ? null
-                      : () async {
-                          setState(() => _saving = true);
-                          try {
-                            await _save();
-                          } finally {
-                            if (mounted) setState(() => _saving = false);
-                          }
-                        },
-                  icon: _saving
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.save_outlined),
-                  label: const Text('保存'),
-                ),
+                const SizedBox(height: 24),
               ],
             ),
           ],

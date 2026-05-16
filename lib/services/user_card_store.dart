@@ -134,9 +134,13 @@ class UserCardStore {
         uri = Uri.parse(url);
       } catch (_) {}
       final host = uri?.host.isNotEmpty == true ? uri!.host : url;
-      final title = (e['fetchedTitle'] as String?)?.isNotEmpty == true
-          ? e['fetchedTitle'] as String
-          : host;
+      final custom = (e['customTitle'] as String?)?.trim();
+      final fetched = (e['fetchedTitle'] as String?)?.trim();
+      final title = (custom != null && custom.isNotEmpty)
+          ? custom
+          : (fetched != null && fetched.isNotEmpty)
+              ? fetched
+              : host;
       final faviconBase64 = e['faviconBase64'] as String?;
       final iconBytes = (faviconBase64 != null && faviconBase64.isNotEmpty)
           ? base64Decode(faviconBase64)
@@ -159,6 +163,7 @@ class UserCardStore {
     List<String> tags = const [],
     String? fetchedTitle,
     Uint8List? faviconBytes,
+    String? customTitle,
   }) async {
     final root = await _loadRoot();
     final entry = <String, dynamic>{
@@ -171,8 +176,24 @@ class UserCardStore {
     if (faviconBytes != null && faviconBytes.isNotEmpty) {
       entry['faviconBase64'] = base64Encode(faviconBytes);
     }
+    if (customTitle != null && customTitle.isNotEmpty) {
+      entry['customTitle'] = customTitle.trim();
+    }
     (root['web'] as List<dynamic>).add(entry);
     await _saveRoot(root);
+  }
+
+  /// 读取网页条目中用户自定义标题（若无则 null）。
+  Future<String?> getWebCustomTitle(String url) async {
+    final root = await _loadRoot();
+    for (final raw in root['web'] as List<dynamic>) {
+      if (raw is Map && (raw['url'] as String?) == url) {
+        final c = raw['customTitle']?.toString().trim();
+        if (c != null && c.isNotEmpty) return c;
+        return null;
+      }
+    }
+    return null;
   }
 
   Future<List<CardItem>> loadCommandCardItems() async {
@@ -184,13 +205,24 @@ class UserCardStore {
       final cmd = e['command'] as String? ?? '';
       if (cmd.isEmpty) continue;
       final tags = _tagsFromJson(e['tags']);
-      var title = cmd.split(RegExp(r'[\r\n]')).first.trim();
+      final waitAfterRun = e['waitAfterRun'] != false;
+      final customTitle = (e['title'] as String?)?.trim();
+      String title;
+      if (customTitle != null && customTitle.isNotEmpty) {
+        title = customTitle;
+      } else {
+        title = cmd.split(RegExp(r'[\r\n]')).first.trim();
+      }
       if (title.length > 48) title = '${title.substring(0, 45)}…';
       out.add(CardItem(
         title: title,
         subtitle: tags.isEmpty ? null : tags.join(', '),
         icon: Icons.terminal,
-        data: cmd,
+        data: <String, dynamic>{
+          'command': cmd,
+          'waitAfterRun': waitAfterRun,
+          if (customTitle != null && customTitle.isNotEmpty) 'title': customTitle,
+        },
         isUserEntry: true,
         tags: tags,
       ));
@@ -198,12 +230,23 @@ class UserCardStore {
     return out;
   }
 
-  Future<void> addCommand({required String command, List<String> tags = const []}) async {
+  Future<void> addCommand({
+    required String command,
+    List<String> tags = const [],
+    bool waitAfterRun = true,
+    String? title,
+  }) async {
     final root = await _loadRoot();
-    (root['commands'] as List<dynamic>).add({
+    final entry = <String, dynamic>{
       'command': command,
       'tags': tags,
-    });
+      'waitAfterRun': waitAfterRun,
+    };
+    final t = title?.trim();
+    if (t != null && t.isNotEmpty) {
+      entry['title'] = t;
+    }
+    (root['commands'] as List<dynamic>).add(entry);
     await _saveRoot(root);
   }
 
@@ -346,22 +389,46 @@ class UserCardStore {
     List<String> tags = const [],
     String? fetchedTitle,
     Uint8List? faviconBytes,
+    String? customTitle,
+    bool removeCustomTitle = false,
   }) async {
     final root = await _loadRoot();
     final list = root['web'] as List<dynamic>;
     for (var i = 0; i < list.length; i++) {
       final e = list[i];
       if (e is Map && (e['url'] as String?) == oldUrl) {
-        list[i] = <String, dynamic>{
+        final prev = Map<String, dynamic>.from(e);
+        final next = <String, dynamic>{
           'url': url,
           'tags': tags,
         };
         if (fetchedTitle != null && fetchedTitle.isNotEmpty) {
-          (list[i] as Map)['fetchedTitle'] = fetchedTitle;
+          next['fetchedTitle'] = fetchedTitle;
+        } else {
+          final pt = prev['fetchedTitle']?.toString();
+          if (pt != null && pt.isNotEmpty) {
+            next['fetchedTitle'] = pt;
+          }
         }
         if (faviconBytes != null && faviconBytes.isNotEmpty) {
-          (list[i] as Map)['faviconBase64'] = base64Encode(faviconBytes);
+          next['faviconBase64'] = base64Encode(faviconBytes);
+        } else {
+          final pb = prev['faviconBase64']?.toString();
+          if (pb != null && pb.isNotEmpty) {
+            next['faviconBase64'] = pb;
+          }
         }
+        if (removeCustomTitle) {
+          // 不写 customTitle
+        } else if (customTitle != null && customTitle.trim().isNotEmpty) {
+          next['customTitle'] = customTitle.trim();
+        } else {
+          final pc = prev['customTitle']?.toString();
+          if (pc != null && pc.isNotEmpty) {
+            next['customTitle'] = pc;
+          }
+        }
+        list[i] = next;
         break;
       }
     }
@@ -379,13 +446,24 @@ class UserCardStore {
     required String oldCommand,
     required String command,
     List<String> tags = const [],
+    bool waitAfterRun = true,
+    String? title,
   }) async {
     final root = await _loadRoot();
     final list = root['commands'] as List<dynamic>;
     for (var i = 0; i < list.length; i++) {
       final e = list[i];
       if (e is Map && (e['command'] as String?) == oldCommand) {
-        list[i] = {'command': command, 'tags': tags};
+        final next = <String, dynamic>{
+          'command': command,
+          'tags': tags,
+          'waitAfterRun': waitAfterRun,
+        };
+        final t = title?.trim();
+        if (t != null && t.isNotEmpty) {
+          next['title'] = t;
+        }
+        list[i] = next;
         break;
       }
     }
@@ -456,4 +534,18 @@ class UserCardStore {
       _suppressAfterPersist = false;
     }
   }
+}
+
+/// 从快捷指令条目的 [CardItem.data] 读取命令正文（兼容旧版存为字符串）。
+String? parseQuickCommandText(dynamic data) {
+  if (data == null) return null;
+  if (data is String) return data;
+  if (data is Map) return data['command']?.toString();
+  return null;
+}
+
+/// 是否需在终端中执行并保留窗口；缺省为 true（新开/保留终端）。
+bool parseQuickCommandWaitAfterRun(dynamic data) {
+  if (data is Map) return data['waitAfterRun'] != false;
+  return true;
 }

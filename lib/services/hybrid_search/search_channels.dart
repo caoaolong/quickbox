@@ -29,7 +29,12 @@ class SearchChannels {
         buf.write(tt);
       }
     }
-    final dataStr = item.data is String ? (item.data as String).trim() : '';
+    final dataStr = switch (item.data) {
+      final String s => s.trim(),
+      final Map m =>
+          (m['command']?.toString() ?? '').trim(),
+      _ => '',
+    };
     if (dataStr.isNotEmpty) {
       buf.write(' ');
       buf.write(dataStr);
