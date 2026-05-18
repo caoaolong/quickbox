@@ -10,3 +10,4 @@
    ```sql
    select proname, proargnames from pg_proc where proname = 'publish_cloud_sync_preset';
    ```
+5. **客户端**：发布构建须在 `flutter build` 时使用 `--dart-define=SUPABASE_URL=...`、`--dart-define=SUPABASE_ANON_KEY=...`（与本仓库 Release 工作流 Secrets 同名）。本地可参考根目录 `.env.example`。

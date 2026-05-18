@@ -46,7 +46,7 @@
 | **混合搜索** | 中文、拼音简拼/全拼、模糊与排序，快捷找应用与自定义条目 |
 | **四张卡片** | 应用索引、网页（含 favicon 等）、命令行、结构化笔记 |
 | **毛玻璃 UI** | 圆角、模糊背景，适合搭在其它窗口之上使用 |
-| **托盘** | 后台驻留，从托盘打开设置或退出 |
+| **托盘** | 后台驻留，从托盘打开设置或退出（Windows 须用 ICO；勿用 PNG 作为托盘资源） |
 | **数据目录** | 可自定义数据根路径，索引与用户条目落盘 |
 | **云同步** | S3 兼容 OSS（如阿里云、MinIO）；启动拉取、本地变更防抖上传、设置页手动下载 |
 
@@ -73,6 +73,7 @@ flutter build windows
 - 需在 **设置 → 云同步** 中填写 Endpoint、Bucket、访问密钥等并**开启**开关。
 - 同步范围：**网页快开、快捷指令、快速笔记**；**不包含**「快捷应用」用户条目。
 - 凭据保存在本机 SharedPreferences，请妥善保管设备与账号权限。
+- **口令码 / 登记到 Supabase**：发布构建须在 `flutter build` 时附带 `--dart-define=SUPABASE_URL=...` 与 `--dart-define=SUPABASE_ANON_KEY=...`（与 GitHub Release 工作流仓库 Secrets 同名）；本地可参考 `.env.example`。
 
 ### 目录结构（节选）
 
@@ -83,7 +84,7 @@ lib/
   cards/                    # 各卡片与交互
   services/                 # 设置、存储、索引、云同步、混合搜索等
 assets/
-  qb.png                    # 应用图标资源
+  qb.png / qb.ico           # 图标（Windows 托盘需 .ico；macOS/其它用 .png）
 docs/
   example1.png              # 主界面
   example2.png              # 搜索结果
@@ -127,7 +128,7 @@ docs/
 | **Hybrid search** | Chinese, pinyin, fuzzy matching and ranking |
 | **Four cards** | App index, web (favicon, etc.), shell commands, structured notes |
 | **Frosted UI** | Blurred, rounded window suited for overlay use |
-| **System tray** | Background stay; open settings or exit from tray |
+| **System tray** | Background stay; **Windows tray requires `.ico`; do not use PNG for tray** |
 | **Data root** | Configurable folder for index + `user_entries.json` |
 | **Cloud sync** | S3-compatible storage; pull on startup, debounced push on change, manual download in Settings |
 
@@ -154,6 +155,7 @@ flutter build windows
 - Configure **Settings → Cloud Sync** (endpoint, bucket, keys) and **enable** the toggle.
 - Synced scope: **web shortcuts, commands, notes** only — **not** the Quick Apps user list.
 - Credentials are stored locally (e.g. SharedPreferences); protect your machine and IAM policies.
+- **Passcode / Supabase presets**: release builds must pass `--dart-define=SUPABASE_URL` and `--dart-define=SUPABASE_ANON_KEY` (GitHub Release workflow uses repository secrets with the same names). See `.env.example` for local dev.
 
 ### Repository layout (excerpt)
 
@@ -164,7 +166,7 @@ lib/
   cards/
   services/
 assets/
-  qb.png
+  qb.png / qb.ico
 docs/
   example1.png
   example2.png

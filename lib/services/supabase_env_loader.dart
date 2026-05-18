@@ -1,7 +1,13 @@
 import 'dart:io';
 
-/// 从 `.env` 解析 Supabase 相关变量（忽略注释与空行）。
-/// 查找顺序：当前工作目录 → 可执行文件所在目录。
+/// 发布构建在 `flutter build` 时注入（与 GitHub Actions Secrets 对应），见根目录 `.env.example` 说明。
+const _kSupabaseUrlFromDefine =
+    String.fromEnvironment('SUPABASE_URL', defaultValue: '');
+const _kSupabaseAnonKeyFromDefine =
+    String.fromEnvironment('SUPABASE_ANON_KEY', defaultValue: '');
+
+/// 加载 Supabase：`--dart-define` 优先；若某键仍为空，再从 `.env` 补全（忽略注释与空行）。
+/// `.env` 查找顺序：当前工作目录 → 可执行文件所在目录。
 abstract final class SupabaseEnvLoader {
   static String _url = '';
   static String _anonKey = '';
@@ -11,16 +17,20 @@ abstract final class SupabaseEnvLoader {
   static String get anonKey => _anonKey;
 
   static Future<void> load() async {
-    _url = '';
-    _anonKey = '';
+    _url = _kSupabaseUrlFromDefine.trim();
+    _anonKey = _kSupabaseAnonKeyFromDefine.trim();
     try {
       final file = await _resolveDotEnvFile();
       if (file == null) {
         return;
       }
       final map = await _parseDotEnv(file);
-      _url = map['SUPABASE_URL']?.trim() ?? '';
-      _anonKey = map['SUPABASE_ANON_KEY']?.trim() ?? '';
+      if (_url.isEmpty) {
+        _url = map['SUPABASE_URL']?.trim() ?? '';
+      }
+      if (_anonKey.isEmpty) {
+        _anonKey = map['SUPABASE_ANON_KEY']?.trim() ?? '';
+      }
     } catch (_) {}
   }
 

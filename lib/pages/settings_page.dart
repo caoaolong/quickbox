@@ -1,3 +1,6 @@
+import 'dart:async' show unawaited;
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
@@ -7,6 +10,7 @@ import '../services/app_settings.dart';
 import '../services/cloud_sync_preset_repository.dart';
 import '../services/cloud_sync_service.dart';
 import '../services/index_service.dart';
+import '../services/github_release_update_service.dart';
 import '../services/supabase_config.dart';
 import '../services/user_card_store.dart';
 import '../widgets/copyable_snackbar.dart';
@@ -37,10 +41,14 @@ class _SettingsPageState extends State<SettingsPage> {
   final GlobalKey<_CloudSyncTabState> _cloudSyncTabKey =
       GlobalKey<_CloudSyncTabState>();
 
+  String _appVersionLabel = '…';
+  bool _updateCheckBusy = false;
+
   @override
   void initState() {
     super.initState();
     widget.appSettings.addListener(_onSettingsChanged);
+    unawaited(_loadAppVersion());
   }
 
   @override
@@ -100,6 +108,10 @@ class _SettingsPageState extends State<SettingsPage> {
                 icon: Icon(Icons.cloud_sync),
                 label: Text('云同步'),
               ),
+              NavigationRailDestination(
+                icon: Icon(Icons.info_outline),
+                label: Text('关于'),
+              ),
             ],
           ),
           const VerticalDivider(width: 1),
@@ -129,6 +141,8 @@ class _SettingsPageState extends State<SettingsPage> {
           userCardStore: widget.userCardStore,
           onCloudSyncApplied: widget.onCloudSyncApplied,
         );
+      case 4:
+        return _buildAboutTab();
       default:
         return const SizedBox.shrink();
     }
@@ -381,6 +395,173 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  Widget _buildAboutTab() {
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '关于 Quick Box',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            '当前版本：$_appVersionLabel',
+            style: const TextStyle(fontSize: 15),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            '检查更新基于 GitHub Releases。请在构建时添加 '
+            '--dart-define=UPDATE_GITHUB_REPO=所有者/仓库名，'
+            '或在 lib/services/update_github_repo.dart 中填写 kUpdateGithubRepoFallback。',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+          ),
+          const SizedBox(height: 20),
+          FilledButton.icon(
+            onPressed: _updateCheckBusy ? null : _onCheckForUpdates,
+            icon: _updateCheckBusy
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.system_update_alt),
+            label: Text(_updateCheckBusy ? '检查中…' : '检查更新'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _loadAppVersion() async {
+    try {
+      final p = await GitHubReleaseUpdateService.packageInfo();
+      if (mounted) {
+        setState(() {
+          _appVersionLabel = '${p.version}（${p.buildNumber}）';
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _appVersionLabel = '未知');
+      }
+    }
+  }
+
+  Future<void> _onCheckForUpdates() async {
+    setState(() => _updateCheckBusy = true);
+    try {
+      final outcome = await GitHubReleaseUpdateService.checkForUpdate();
+      if (!mounted) {
+        return;
+      }
+      switch (outcome) {
+        case UpdateCheckNotConfigured():
+          showCopyableSnackBar(
+            context,
+            '未配置更新仓库：请设置 UPDATE_GITHUB_REPO 或在 update_github_repo.dart 填写仓库名',
+          );
+          break;
+        case UpdateCheckError(:final message):
+          showCopyableSnackBar(context, message);
+          break;
+        case UpdateCheckUpToDate():
+          showCopyableSnackBar(context, '当前已是最新版本');
+          break;
+        case UpdateAvailable(
+            :final currentVersion,
+            :final remoteVersion,
+            :final downloadUrl,
+            :final releaseNotes,
+          ):
+          await _promptInstallUpdate(
+            currentVersion: currentVersion,
+            remoteVersion: remoteVersion,
+            downloadUrl: downloadUrl,
+            releaseNotes: releaseNotes,
+          );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _updateCheckBusy = false);
+      }
+    }
+  }
+
+  Future<void> _promptInstallUpdate({
+    required String currentVersion,
+    required String remoteVersion,
+    required String downloadUrl,
+    required String releaseNotes,
+  }) async {
+    if (!mounted) {
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('发现新版本 v$remoteVersion'),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('当前版本：v$currentVersion'),
+                const SizedBox(height: 12),
+                if (releaseNotes.isNotEmpty) ...[
+                  const Text(
+                    '更新说明：',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 6),
+                  SelectableText(
+                    releaseNotes,
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('稍后'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('立即更新'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => _UpdateDownloadDialog(
+        downloadUrl: downloadUrl,
+        onNonWindowsFinished: Platform.isWindows
+            ? null
+            : () {
+                if (!context.mounted) {
+                  return;
+                }
+                showCopyableSnackBar(
+                  context,
+                  Platform.isMacOS
+                      ? '已打开安装映像，请将应用拖入「应用程序」完成更新'
+                      : '已尝试打开安装包，请按屏幕提示完成更新',
+                );
+              },
+      ),
+    );
+  }
+
   Future<void> _pickDataRoot() async {
     final result = await FilePicker.platform.getDirectoryPath();
     if (result != null) {
@@ -407,6 +588,102 @@ class _SettingsPageState extends State<SettingsPage> {
     } finally {
       setState(() => _isBuildingIndex = false);
     }
+  }
+}
+
+class _UpdateDownloadDialog extends StatefulWidget {
+  const _UpdateDownloadDialog({
+    required this.downloadUrl,
+    this.onNonWindowsFinished,
+  });
+
+  final String downloadUrl;
+  final VoidCallback? onNonWindowsFinished;
+
+  @override
+  State<_UpdateDownloadDialog> createState() => _UpdateDownloadDialogState();
+}
+
+class _UpdateDownloadDialogState extends State<_UpdateDownloadDialog> {
+  int _received = 0;
+  int? _total;
+  Object? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _runDownload();
+  }
+
+  Future<void> _runDownload() async {
+    try {
+      await GitHubReleaseUpdateService.downloadAndApplyUpdate(
+        downloadUrl: widget.downloadUrl,
+        onProgress: (received, total) {
+          if (mounted) {
+            setState(() {
+              _received = received;
+              _total = total;
+            });
+          }
+        },
+      );
+      if (!mounted) {
+        return;
+      }
+      if (Platform.isWindows) {
+        return;
+      }
+      Navigator.of(context).pop();
+      widget.onNonWindowsFinished?.call();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = e);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final err = _error;
+    if (err != null) {
+      return AlertDialog(
+        title: const Text('更新失败'),
+        content: SingleChildScrollView(child: Text('$err')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      );
+    }
+    final t = _total;
+    final progress = t != null && t > 0 ? _received / t : null;
+    return AlertDialog(
+      title: const Text('正在下载更新'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          LinearProgressIndicator(value: progress),
+          const SizedBox(height: 12),
+          Text(
+            t != null && t > 0
+                ? '${(_received / 1024).toStringAsFixed(1)} / ${(t / 1024).toStringAsFixed(1)} KB'
+                : '正在连接…',
+            style: const TextStyle(fontSize: 12),
+          ),
+          if (Platform.isWindows) ...[
+            const SizedBox(height: 12),
+            Text(
+              '下载完成后将自动运行安装程序并退出应用。',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 }
 
@@ -489,7 +766,7 @@ class _CloudSyncTabState extends State<_CloudSyncTab> {
       if (!mounted) return;
       showCopyableSnackBar(
         context,
-        '未配置 Supabase：请在工程根目录（或与 exe 同级）放置 .env，填写 SUPABASE_URL、SUPABASE_ANON_KEY',
+        '未配置 Supabase：发布包需带构建期注入的 SUPABASE_URL、SUPABASE_ANON_KEY；本地开发可 `flutter run --dart-define=...` 或放置 .env',
       );
       return;
     }
@@ -613,7 +890,7 @@ class _CloudSyncTabState extends State<_CloudSyncTab> {
       if (!mounted) return;
       showCopyableSnackBar(
         context,
-        '未配置 Supabase：请在工程根目录（或与 exe 同级）放置 .env，填写 SUPABASE_URL、SUPABASE_ANON_KEY',
+        '未配置 Supabase：发布包需带构建期注入的 SUPABASE_URL、SUPABASE_ANON_KEY；本地开发可 `flutter run --dart-define=...` 或放置 .env',
       );
       return;
     }
@@ -730,7 +1007,7 @@ class _CloudSyncTabState extends State<_CloudSyncTab> {
             Padding(
               padding: const EdgeInsets.only(bottom: 12),
               child: Text(
-                '提示：口令码与「测试并联用」需在 .env 中配置 SUPABASE_URL、SUPABASE_ANON_KEY。',
+                '提示：口令码与「测试并联用」需应用已配置 Supabase（发布包由构建注入；本地可用 .env 或 --dart-define）。',
                 style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
               ),
             ),

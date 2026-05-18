@@ -7,7 +7,9 @@ abstract final class CloudSyncPresetRepository {
   static Future<String> publishPreset(Map<String, dynamic> config) async {
     final client = SupabaseClientHolder.maybeClient;
     if (client == null) {
-      throw StateError('Supabase 未初始化：请配置 .env 中的 SUPABASE_URL 与 SUPABASE_ANON_KEY 后重启应用');
+      throw StateError(
+        'Supabase 未初始化：请确认构建已注入 SUPABASE_URL、SUPABASE_ANON_KEY（或本地 .env / --dart-define）后重启应用',
+      );
     }
     try {
       final raw = await client.rpc(
@@ -34,7 +36,9 @@ abstract final class CloudSyncPresetRepository {
   static Future<Map<String, dynamic>?> lookupByPasscode(String passcodeRaw) async {
     final client = SupabaseClientHolder.maybeClient;
     if (client == null) {
-      throw StateError('Supabase 未初始化：请配置 .env 中的 SUPABASE_URL 与 SUPABASE_ANON_KEY 后重启应用');
+      throw StateError(
+        'Supabase 未初始化：请确认构建已注入 SUPABASE_URL、SUPABASE_ANON_KEY（或本地 .env / --dart-define）后重启应用',
+      );
     }
     final pass = passcodeRaw.trim();
     if (pass.isEmpty) {

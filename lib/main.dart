@@ -1,11 +1,12 @@
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'dart:io' show Directory, File, Platform;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as path_helper;
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
@@ -570,7 +571,25 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
   }
 
   void _initTray() async {
-    await trayManager.setIcon('assets/qb.png');
+    // Windows：`tray_manager` 只能用 ICO（LoadImage(IMAGE_ICON)）；曾改用 qb.png 会导致托盘无图标。
+    // 另外若仅依赖 exe 旁的 `data/flutter_assets/...`，不完整安装或非标准拷贝会缺文件；从 bundle 解到 TEMP 可避免路径问题。
+    if (Platform.isWindows) {
+      try {
+        final data = await rootBundle.load('assets/qb.ico');
+        final trayFile =
+            File(path_helper.join(Directory.systemTemp.path, 'quickbox_tray.ico'));
+        final bytes =
+            data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+        await trayFile.writeAsBytes(bytes, flush: true);
+        await trayManager.setIcon(trayFile.path);
+      } catch (e, st) {
+        debugPrint('Windows tray icon: $e\n$st');
+        await trayManager.setIcon('assets/qb.ico');
+      }
+    } else {
+      await trayManager.setIcon('assets/qb.png');
+    }
+    await trayManager.setToolTip('Quick Box');
     Menu menu = Menu(
       items: [
         MenuItem(key: 'show', label: '显示'),
