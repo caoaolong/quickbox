@@ -411,9 +411,8 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 10),
           Text(
-            '检查更新基于 GitHub Releases。请在构建时添加 '
-            '--dart-define=UPDATE_GITHUB_REPO=所有者/仓库名，'
-            '或在 lib/services/update_github_repo.dart 中填写 kUpdateGithubRepoFallback。',
+            '检查更新优先使用构建参数 UPDATE_GITHUB_REPO，其次读取工程根目录 `.env` 中同名键；'
+            '若都未设置，则使用 update_github_repo.dart 中的默认仓库。',
             style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
           ),
           const SizedBox(height: 20),
@@ -459,7 +458,8 @@ class _SettingsPageState extends State<SettingsPage> {
         case UpdateCheckNotConfigured():
           showCopyableSnackBar(
             context,
-            '未配置更新仓库：请设置 UPDATE_GITHUB_REPO 或在 update_github_repo.dart 填写仓库名',
+            '未配置更新仓库：请设置 UPDATE_GITHUB_REPO（dart-define 或 .env），'
+            '或在 update_github_repo.dart 修改 kUpdateGithubRepoFallback',
           );
           break;
         case UpdateCheckError(:final message):

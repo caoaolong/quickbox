@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -6,7 +7,38 @@ import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'supabase_env_loader.dart';
 import 'update_github_repo.dart';
+
+/// 将 GitHub 相关的网络异常转成可读中文说明。
+String _humanizeGithubNetworkError(Object e) {
+  if (e is StateError) {
+    final m = e.message;
+    if (m.startsWith('下载失败') || m == '非法下载地址') {
+      return m;
+    }
+  }
+  final t = e.toString();
+  if (e is TimeoutException ||
+      t.contains('TimeoutException') ||
+      t.toLowerCase().contains('timed out')) {
+    return '连接 GitHub 超时，请检查网络或稍后重试。';
+  }
+  if (t.contains('Failed host lookup') ||
+      t.contains('nodename nor servname provided') ||
+      t.contains('errno = 8') ||
+      (t.contains('SocketException') &&
+          (t.contains('lookup') || t.contains('nodename')))) {
+    return '无法访问 GitHub（域名解析失败 api.github.com）。'
+        '请确认：设备已联网、DNS 正常；防火墙或公司网络是否拦截 GitHub。'
+        '在中国大陆网络下 GitHub 常不稳定，可尝试更换 DNS、开启系统代理/VPN，'
+        '或用浏览器访问 https://api.github.com 验证后再检查更新。';
+  }
+  if (t.contains('SocketException')) {
+    return '网络异常，无法连接服务器：${t.contains('\n') ? t.split('\n').first : t}';
+  }
+  return '检查更新失败：$e';
+}
 
 /// GitHub `releases/latest` 检查结果。
 sealed class UpdateCheckOutcome {
@@ -50,6 +82,10 @@ abstract final class GitHubReleaseUpdateService {
     final d = kUpdateGithubRepoFromDefine.trim();
     if (d.isNotEmpty) {
       return d;
+    }
+    final fromDot = SupabaseEnvLoader.updateGithubRepo.trim();
+    if (fromDot.isNotEmpty) {
+      return fromDot;
     }
     return kUpdateGithubRepoFallback.trim();
   }
@@ -118,7 +154,7 @@ abstract final class GitHubReleaseUpdateService {
       );
     } catch (e, st) {
       debugPrint('checkForUpdate: $e\n$st');
-      return UpdateCheckError('检查更新失败：$e');
+      return UpdateCheckError(_humanizeGithubNetworkError(e));
     }
   }
 
@@ -168,6 +204,9 @@ abstract final class GitHubReleaseUpdateService {
       } else {
         await Process.run('xdg-open', [file.path]);
       }
+    } catch (e, st) {
+      debugPrint('downloadAndApplyUpdate: $e\n$st');
+      throw StateError(_humanizeGithubNetworkError(e));
     } finally {
       client.close();
     }

@@ -11,6 +11,8 @@ const _kSupabaseAnonKeyFromDefine =
 abstract final class SupabaseEnvLoader {
   static String _url = '';
   static String _anonKey = '';
+  /// 与 Supabase 共用 `.env`：`UPDATE_GITHUB_REPO=owner/repo`，供检查更新读取。
+  static String updateGithubRepo = '';
 
   static String get url => _url;
 
@@ -19,6 +21,7 @@ abstract final class SupabaseEnvLoader {
   static Future<void> load() async {
     _url = _kSupabaseUrlFromDefine.trim();
     _anonKey = _kSupabaseAnonKeyFromDefine.trim();
+    updateGithubRepo = '';
     try {
       final file = await _resolveDotEnvFile();
       if (file == null) {
@@ -31,6 +34,7 @@ abstract final class SupabaseEnvLoader {
       if (_anonKey.isEmpty) {
         _anonKey = map['SUPABASE_ANON_KEY']?.trim() ?? '';
       }
+      updateGithubRepo = map['UPDATE_GITHUB_REPO']?.trim() ?? '';
     } catch (_) {}
   }
 

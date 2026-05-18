@@ -20,8 +20,19 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        shell: pwsh
         run: |
+          $tag = "${{ github.ref_name }}"
+          $t = $tag.TrimStart('v')
+          if ($t -notmatch '^(\d+\.\d+\.\d+)(?:[+\-].*)?$') {
+            Write-Error "Release 标签须为 vX.Y.Z（例如 v1.2.0），当前：$tag"
+            exit 1
+          }
+          $buildName = $Matches[1]
+          $buildNumber = "${{ github.run_number }}"
           flutter build windows --release `
+            --build-name=$buildName `
+            --build-number=$buildNumber `
             --dart-define=SUPABASE_URL="$env:SUPABASE_URL" `
             --dart-define=SUPABASE_ANON_KEY="$env:SUPABASE_ANON_KEY" `
             --dart-define=UPDATE_GITHUB_REPO="${{ github.repository }}"
@@ -52,6 +63,7 @@ jobs:
           DefaultDirName={autopf}\QuickBox
           DefaultGroupName=QuickBox
           UninstallDisplayIcon={app}\quickbox.exe
+          SetupIconFile=windows\runner\resources\app_icon.ico
           OutputDir=installer-output
           OutputBaseFilename=QuickBox-Setup-$version
           Compression=lzma2
@@ -88,7 +100,15 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if ! [[ "$tag" =~ ^([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            echo "Release 标签须为 vX.Y.Z（例如 v1.2.0），当前：${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          build_name="${BASH_REMATCH[1]}"
           flutter build macos --release \
+            --build-name="$build_name" \
+            --build-number="${{ github.run_number }}" \
             --dart-define=SUPABASE_URL="$SUPABASE_URL" \
             --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
             --dart-define=UPDATE_GITHUB_REPO="${{ github.repository }}"
