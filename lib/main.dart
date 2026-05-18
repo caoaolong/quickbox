@@ -23,6 +23,8 @@ import 'cards/quick_notes.dart';
 import 'cards/icon_extractor.dart';
 import 'services/hybrid_search/hybrid_search_engine.dart';
 import 'services/shortcut_service.dart';
+import 'services/supabase_client_holder.dart';
+import 'services/supabase_env_loader.dart';
 
 /// 不绘制滚动条，保留滚轮、触控板与拖拽滚动。
 class NoScrollbarScrollBehavior extends MaterialScrollBehavior {
@@ -85,8 +87,11 @@ void main() async {
   await windowManager.ensureInitialized();
   await hotKeyManager.unregisterAll();
 
+  await SupabaseEnvLoader.load();
+
   final appSettings = AppSettings();
   await appSettings.load();
+  SupabaseClientHolder.initialize();
 
   WindowOptions windowOptions = const WindowOptions(
     size: Size(800, 400),
@@ -565,7 +570,7 @@ class _QuickBox extends State<QuickBox> with TrayListener, WindowListener {
   }
 
   void _initTray() async {
-    await trayManager.setIcon('assets/qb.ico');
+    await trayManager.setIcon('assets/qb.png');
     Menu menu = Menu(
       items: [
         MenuItem(key: 'show', label: '显示'),

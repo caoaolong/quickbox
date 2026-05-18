@@ -83,7 +83,7 @@ lib/
   cards/                    # 各卡片与交互
   services/                 # 设置、存储、索引、云同步、混合搜索等
 assets/
-  qb.png / qb.ico           # 应用图标资源
+  qb.png                    # 应用图标资源
 docs/
   example1.png              # 主界面
   example2.png              # 搜索结果
@@ -164,7 +164,7 @@ lib/
   cards/
   services/
 assets/
-  qb.png / qb.ico
+  qb.png
 docs/
   example1.png
   example2.png

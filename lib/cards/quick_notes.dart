@@ -11,6 +11,25 @@ class _QuickNotesItemInteractor implements CardItemInteractor {
   _QuickNotesItemInteractor(this.card);
   final QuickNotesCard card;
 
+  /// 普通笔记：不包含标题；正文与各标签分段用 `\n\n` 连接。
+  static String _plainNoteClipboard(Map<String, dynamic> m) {
+    final parts = <String>[];
+    final body = m['noteContent']?.toString().trim() ?? '';
+    if (body.isNotEmpty) {
+      parts.add(body);
+    }
+    final tagsRaw = m['tags'];
+    if (tagsRaw is List) {
+      for (final e in tagsRaw) {
+        final t = e.toString().trim();
+        if (t.isNotEmpty) {
+          parts.add(t);
+        }
+      }
+    }
+    return parts.join('\n\n');
+  }
+
   @override
   void onItemTap(CardItem item) {
     if (!item.isUserEntry) return;
@@ -22,17 +41,20 @@ class _QuickNotesItemInteractor implements CardItemInteractor {
       final kind = m['kind']?.toString() ?? NoteKind.note;
       final String text;
       switch (kind) {
-        case NoteKind.account:
-          text =
-              '账户名：${m['accountName'] ?? ''}\n用户名：${m['userName'] ?? ''}\n密码：${m['password'] ?? ''}';
+        case NoteKind.account: {
+          final parts = <String>[];
+          final u = m['userName']?.toString().trim() ?? '';
+          final p = m['password']?.toString().trim() ?? '';
+          if (u.isNotEmpty) parts.add(u);
+          if (p.isNotEmpty) parts.add(p);
+          text = parts.join('\n\n');
           break;
+        }
         case NoteKind.token:
-          text = '账户名：${m['accountName'] ?? ''}\nToken：${m['tokenValue'] ?? ''}';
+          text = m['tokenValue']?.toString().trim() ?? '';
           break;
         default:
-          final t = m['title']?.toString().trim() ?? '';
-          final body = m['noteContent']?.toString() ?? '';
-          text = t.isNotEmpty ? '$t\n\n$body' : body;
+          text = _plainNoteClipboard(m);
       }
       Clipboard.setData(ClipboardData(text: text));
     } catch (_) {

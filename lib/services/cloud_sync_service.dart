@@ -35,6 +35,53 @@ class CloudSyncService {
     );
   }
 
+  /// 在未保存到 [AppSettings] 前校验 Endpoint / Bucket / 密钥是否可读（HEAD Bucket）。
+  static Future<void> verifyOssConnectivity({
+    required String endpointRaw,
+    required String regionRaw,
+    required String bucketRaw,
+    required String accessKeyIdRaw,
+    required String secretAccessKeyRaw,
+    required bool pathStyle,
+  }) async {
+    final endpoint = endpointRaw.trim();
+    final bucket = bucketRaw.trim();
+    if (endpoint.isEmpty || bucket.isEmpty) {
+      throw StateError('请先填写 Endpoint 与 Bucket');
+    }
+    final accessKeyId = accessKeyIdRaw.trim();
+    if (accessKeyId.isEmpty || secretAccessKeyRaw.isEmpty) {
+      throw StateError('请先填写 Access Key 与 Secret');
+    }
+
+    final parsed = _parseEndpoint(endpoint);
+    final region = regionRaw.trim();
+    final minio = Minio(
+      endPoint: parsed.host,
+      port: parsed.port,
+      useSSL: parsed.useSSL,
+      accessKey: accessKeyId,
+      secretKey: secretAccessKeyRaw,
+      region: region.isEmpty ? null : region,
+      pathStyle: pathStyle,
+    );
+
+    try {
+      final ok = await minio.bucketExists(bucket);
+      if (!ok) {
+        throw StateError('Bucket 不存在或暂无访问权限，请核对名称与密钥权限');
+      }
+    } catch (e) {
+      if (e is StateError) {
+        rethrow;
+      }
+      Error.throwWithStackTrace(
+        StateError('无法连接 OSS（$e）'),
+        StackTrace.current,
+      );
+    }
+  }
+
   String _objectKey() {
     var p = appSettings.s3Prefix.trim().replaceAll(r'\', '/');
     while (p.startsWith('/')) {

@@ -23,6 +23,11 @@ class AppSettings extends ChangeNotifier {
   static const _s3SecretKey = 's3_secret_key';
   static const _s3PrefixKey = 's3_prefix';
   static const _s3PathStyleKey = 's3_path_style';
+  static const _cloudSyncUiModeKey = 'cloud_sync_ui_mode';
+
+  /// 设置页「云同步」展示方式：`oss_direct` 直接填写 OSS，`oss_passcode` 仅用口令加载。
+  static const cloudSyncUiModeOssDirect = 'oss_direct';
+  static const cloudSyncUiModeOssPasscode = 'oss_passphrase';
   static const int cardShortcutCount = 4;
 
   ThemeMode _themeMode = ThemeMode.system;
@@ -38,6 +43,7 @@ class AppSettings extends ChangeNotifier {
   String _s3SecretAccessKey = '';
   String _s3Prefix = '';
   bool _s3PathStyle = false;
+  String _cloudSyncUiMode = cloudSyncUiModeOssDirect;
 
   ThemeMode get themeMode => _themeMode;
   HotKey? get hotKey => _hotKey;
@@ -59,6 +65,9 @@ class AppSettings extends ChangeNotifier {
   String get s3SecretAccessKey => _s3SecretAccessKey;
   String get s3Prefix => _s3Prefix;
   bool get s3PathStyle => _s3PathStyle;
+
+  /// 与 [cloudSyncUiModeOssDirect] / [cloudSyncUiModeOssPasscode] 对应。
+  String get cloudSyncUiMode => _cloudSyncUiMode;
 
   /// 是否已填写启用同步所需的最小 S3 配置（不含密钥也可只读场景，此处要求 bucket+endpoint）
   bool get hasCloudSyncConfig =>
@@ -129,6 +138,9 @@ class AppSettings extends ChangeNotifier {
     _s3SecretAccessKey = prefs.getString(_s3SecretKey) ?? '';
     _s3Prefix = prefs.getString(_s3PrefixKey) ?? '';
     _s3PathStyle = prefs.getBool(_s3PathStyleKey) ?? false;
+    final mode = prefs.getString(_cloudSyncUiModeKey);
+    _cloudSyncUiMode =
+        mode == cloudSyncUiModeOssPasscode ? cloudSyncUiModeOssPasscode : cloudSyncUiModeOssDirect;
 
     notifyListeners();
   }
@@ -161,6 +173,19 @@ class AppSettings extends ChangeNotifier {
     await prefs.setString(_s3SecretKey, _s3SecretAccessKey);
     await prefs.setString(_s3PrefixKey, _s3Prefix);
     await prefs.setBool(_s3PathStyleKey, _s3PathStyle);
+    notifyListeners();
+  }
+
+  Future<void> setCloudSyncUiMode(String mode) async {
+    final next = mode == cloudSyncUiModeOssPasscode
+        ? cloudSyncUiModeOssPasscode
+        : cloudSyncUiModeOssDirect;
+    if (_cloudSyncUiMode == next) {
+      return;
+    }
+    _cloudSyncUiMode = next;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_cloudSyncUiModeKey, _cloudSyncUiMode);
     notifyListeners();
   }
 
